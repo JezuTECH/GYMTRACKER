@@ -40,6 +40,8 @@ const ExerciseForm = ({ user, onViewChart }) => {
   const [lastTimestamp, setLastTimestamp] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null);
   const [summaryData, setSummaryData] = useState([]);
+  const [infoItem, setInfoItem] = useState(null);
+  const [headerInfo, setHeaderInfo] = useState(null);
 
   // Imagen del ejercicio (solo lectura)
   const [imageUrl, setImageUrl] = useState(null);
@@ -85,9 +87,11 @@ const ExerciseForm = ({ user, onViewChart }) => {
       setLastWeight(null);
       setLastReps(null);
       setLastTimestamp(null);
+      setHeaderInfo(null);
       return;
     }
 
+    // Nueva lógica: obtener el último día registrado y calcular repsAvg y calcWeight
     const fetchLast = async () => {
       const q = query(
         collection(db, "workouts"),
@@ -95,25 +99,95 @@ const ExerciseForm = ({ user, onViewChart }) => {
         where("exercise", "==", exercise),
         where("muscleGroup", "==", muscleGroup),
         orderBy("timestamp", "desc"),
-        limit(1)
+        limit(50)
       );
       const snapshot = await getDocs(q);
-      if (!snapshot.empty) {
-        const data = snapshot.docs[0].data();
-        setLastWeight(data.weight ?? null);
-        setLastReps(data.reps ?? null);
-        setLastTimestamp(
-          data.timestamp?.seconds
-            ? new Date(data.timestamp.seconds * 1000).toLocaleString()
-            : data.timestamp?.toDate
-              ? data.timestamp.toDate().toLocaleString()
-              : null
-        );
-      } else {
+      if (snapshot.empty) {
         setLastWeight(null);
         setLastReps(null);
         setLastTimestamp(null);
+        setHeaderInfo(null);
+        return;
       }
+
+      // Helpers
+      const toJsDate = (t) =>
+        t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
+      const pad2 = (n) => String(n).padStart(2, "0");
+      const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+      const docs = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
+
+      // Determine latest day key (local day)
+      let latestKey = null;
+      let latestDate = null;
+      for (const d of docs) {
+        const dt = toJsDate(d.timestamp);
+        if (!dt) continue;
+        const key = keyForDay(dt);
+        if (!latestDate || dt > latestDate) {
+          latestDate = dt;
+          latestKey = key;
+        }
+      }
+
+      // Filter docs of that day
+      const docsOfDay = docs.filter((d) => {
+        const dt = toJsDate(d.timestamp);
+        return dt && keyForDay(dt) === latestKey;
+      });
+
+      if (!docsOfDay.length) {
+        setLastWeight(null);
+        setLastReps(null);
+        setLastTimestamp(null);
+        setHeaderInfo(null);
+        return;
+      }
+
+      // Compute:
+      // - repsUsed = reps if present/valid, else 10 (default)
+      // - calcWeight = sum(weight * repsUsed) / sum(repsUsed)   (1 decimal)
+      // - repsAvg    = arithmetic mean of repsUsed (rounded)
+      let wrSum = 0;
+      let repsSum = 0;
+      let repsSumForAvg = 0;
+      let count = 0;
+
+      docsOfDay.forEach((d) => {
+        const w = typeof d.weight === "number" ? d.weight : 0;
+        const r = typeof d.reps === "number" && d.reps > 0 ? d.reps : 10; // default 10
+        wrSum += w * r;
+        repsSum += r;
+        repsSumForAvg += r;
+        count += 1;
+      });
+
+      const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : null;
+      const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : null;
+
+      setLastWeight(calcWeight ?? null);
+      setLastReps(repsAvg ?? null);
+      setLastTimestamp(latestDate ? latestDate.toLocaleString() : null);
+      // preparar info para el modal desde la selección actual (cabecera)
+      const debugRowsHeader = docsOfDay.map((d) => {
+        const t = d.timestamp?.toDate ? d.timestamp.toDate() : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
+        return {
+          weight: typeof d.weight === "number" ? d.weight : null,
+          reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
+          timestamp: t
+        };
+      });
+      setHeaderInfo({
+        exercise,
+        muscleGroup,
+        weight: calcWeight ?? "-",
+        reps: repsAvg ?? "-",
+        _lastDay: latestDate || null,
+        _calcWeight: calcWeight ?? null,
+        _repsAvg: repsAvg ?? null,
+        _debugRows: debugRowsHeader
+      });
     };
     fetchLast();
   }, [exercise, muscleGroup, user]);
@@ -132,29 +206,99 @@ const ExerciseForm = ({ user, onViewChart }) => {
 
     const summaries = await Promise.all(
       uniquePairs.map(async (ex) => {
+        // Buscar los últimos 50 registros para ese ejercicio/grupo
         const q = query(
           collection(db, "workouts"),
           where("uid", "==", user.uid),
           where("exercise", "==", ex.exercise),
           where("muscleGroup", "==", ex.muscleGroup),
           orderBy("timestamp", "desc"),
-          limit(1)
+          limit(50)
         );
         const snapshot = await getDocs(q);
         if (!snapshot.empty) {
-          const d = snapshot.docs[0].data();
-          return {
-            exercise: ex.exercise,
-            muscleGroup: d.muscleGroup || ex.muscleGroup || "",
-            weight: d.weight ?? "-",
-            reps: d.reps ?? "-",
-          };
+          // Helpers
+          const toJsDate = (t) =>
+            t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
+          const pad2 = (n) => String(n).padStart(2, "0");
+          const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+          const docs = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
+
+          // Latest day
+          let latestKey = null;
+          let latestDate = null;
+          for (const d of docs) {
+            const dt = toJsDate(d.timestamp);
+            if (!dt) continue;
+            const key = keyForDay(dt);
+            if (!latestDate || dt > latestDate) {
+              latestDate = dt;
+              latestKey = key;
+            }
+          }
+
+          // Docs of that latest day
+          const docsOfDay = docs.filter((d) => {
+            const dt = toJsDate(d.timestamp);
+            return dt && keyForDay(dt) === latestKey;
+          });
+          const debugRows = docsOfDay.map((d) => ({
+            weight: typeof d.weight === "number" ? d.weight : null,
+            reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
+            timestamp: toJsDate(d.timestamp)
+          }));
+
+          if (docsOfDay.length > 0) {
+            let wrSum = 0;
+            let repsSum = 0;
+            let repsSumForAvg = 0;
+            let count = 0;
+
+            docsOfDay.forEach((d) => {
+              const w = typeof d.weight === "number" ? d.weight : 0;
+              const r = typeof d.reps === "number" && d.reps > 0 ? d.reps : 10; // default 10
+              wrSum += w * r;
+              repsSum += r;
+              repsSumForAvg += r;
+              count += 1;
+            });
+
+            const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : "-";
+            const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : "-";
+
+            return {
+              exercise: ex.exercise,
+              muscleGroup: docsOfDay[0].muscleGroup || ex.muscleGroup || "",
+              weight: calcWeight,
+              reps: repsAvg,
+              _lastDay: latestDate,
+              _calcWeight: calcWeight,
+              _repsAvg: repsAvg,
+              _debugRows: debugRows,
+            };
+          } else {
+            return {
+              exercise: ex.exercise,
+              muscleGroup: ex.muscleGroup || "",
+              weight: "-",
+              reps: "-",
+              _lastDay: null,
+              _calcWeight: null,
+              _repsAvg: null,
+              _debugRows: [],
+            };
+          }
         } else {
           return {
             exercise: ex.exercise,
             muscleGroup: ex.muscleGroup || "",
             weight: "-",
             reps: "-",
+            _lastDay: null,
+            _calcWeight: null,
+            _repsAvg: null,
+            _debugRows: [],
           };
         }
       })
@@ -275,6 +419,17 @@ const ExerciseForm = ({ user, onViewChart }) => {
     lineHeight: 1,
   };
 
+  // Helper para fecha DD/MM/AAAA (día semana)
+  const formatDateLabel = (value) => {
+    if (!value) return "";
+    const d = value instanceof Date ? value : new Date(value);
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const weekday = d.toLocaleDateString("es-ES", { weekday: "long" });
+    return `${dd}/${mm}/${yyyy} (${weekday})`;
+  };
+
   return (
     <>
       <form onSubmit={handleSubmit} style={{ maxWidth: "400px", margin: "2rem auto", padding: "0 1rem" }}>
@@ -367,12 +522,38 @@ const ExerciseForm = ({ user, onViewChart }) => {
 
         {/* Último registro */}
         {(lastWeight !== null || lastReps !== null) && (
-          <p style={{ fontSize: "0.9rem", color: "gray" }}>
-            Último registro:{" "}
-            <strong>
-              {lastWeight !== null ? `${lastWeight} kg` : "-"}{lastReps !== null ? ` × ${lastReps} reps` : ""}
-            </strong>
-            {lastTimestamp && <> — <strong>{lastTimestamp}</strong></>}
+          <p style={{ fontSize: "0.9rem", color: "gray", display: "flex", alignItems: "center", gap: 8 }}>
+            <span>
+              Último registro:{" "}
+              <strong>
+                {lastWeight !== null ? `${lastWeight} kg` : "-"}{lastReps !== null ? ` × ${lastReps} reps` : ""}
+              </strong>
+              {lastTimestamp && <> — <strong>{lastTimestamp}</strong></>}
+            </span>
+            {headerInfo && (
+              <button
+                type="button"
+                onClick={() => setInfoItem(headerInfo)}
+                title="Ver detalle del cálculo"
+                aria-label="Ver detalle del cálculo"
+                style={{
+                  padding: "2px 5px",
+                  borderRadius: 4,
+                  border: "1px solid #ddd",
+                  background: "#f6f6f6",
+                  cursor: "pointer",
+                  fontSize: "0.92rem",
+                  lineHeight: 1,
+                  minWidth: 0,
+                  height: "1.5em",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                ℹ️
+              </button>
+            )}
           </p>
         )}
 
@@ -422,10 +603,11 @@ const ExerciseForm = ({ user, onViewChart }) => {
           <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "2rem" }}>
             <thead>
               <tr>
-                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem" }}>Grupo</th>
-                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem" }}>Ejercicio</th>
-                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem", textAlign: "center" }}>Último peso</th>
-                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem", textAlign: "center" }}>Últimas reps</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.25rem 0.35rem", fontSize: "0.97rem" }}>Grupo</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.25rem 0.35rem", fontSize: "0.97rem" }}>Ejercicio</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.25rem 0.35rem", textAlign: "center", fontSize: "0.97rem" }}>Peso</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.25rem 0.35rem", textAlign: "center", fontSize: "0.97rem" }}>Reps</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.25rem 0.35rem", textAlign: "center", fontSize: "0.97rem" }}>Info</th>
               </tr>
             </thead>
             <tbody>
@@ -436,6 +618,14 @@ const ExerciseForm = ({ user, onViewChart }) => {
                   onClick={() => {
                     setExercise(item.exercise);
                     setMuscleGroup(item.muscleGroup);
+                    // También actualizar lastWeight, lastReps, lastTimestamp con los valores calculados
+                    setLastWeight(item._calcWeight && item._calcWeight !== "-" ? item._calcWeight : null);
+                    setLastReps(item._repsAvg && item._repsAvg !== "-" ? item._repsAvg : null);
+                    setLastTimestamp(
+                      item._lastDay
+                        ? item._lastDay.toLocaleString()
+                        : null
+                    );
                     const filtered = allExercises
                       .filter((ex) => ex.muscleGroup === item.muscleGroup)
                       .map((ex) => ex.exercise);
@@ -448,17 +638,41 @@ const ExerciseForm = ({ user, onViewChart }) => {
                     }, 100);
                   }}
                 >
-                  <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem" }}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.25rem 0.35rem", fontSize: "0.97rem" }}>
                     {item.muscleGroup || "-"}
                   </td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem" }}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.25rem 0.35rem", fontSize: "0.97rem" }}>
                     {item.exercise}
                   </td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem", textAlign: "center" }}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.25rem 0.35rem", textAlign: "center", fontSize: "0.97rem" }}>
                     {item.weight}
                   </td>
-                  <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem", textAlign: "center" }}>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.25rem 0.35rem", textAlign: "center", fontSize: "0.97rem" }}>
                     {item.reps}
+                  </td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.18rem 0.18rem", textAlign: "center", fontSize: "0.97rem" }}>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); setInfoItem(item); }}
+                      title="Ver detalle del cálculo"
+                      aria-label="Ver detalle del cálculo"
+                      style={{
+                        padding: "2px 5px",
+                        borderRadius: 4,
+                        border: "1px solid #ddd",
+                        background: "#f6f6f6",
+                        cursor: "pointer",
+                        fontSize: "0.92rem",
+                        lineHeight: 1,
+                        minWidth: 0,
+                        height: "1.5em",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      ℹ️
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -481,6 +695,65 @@ const ExerciseForm = ({ user, onViewChart }) => {
             alt="Ejercicio"
             style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.5)" }}
           />
+        </div>
+      )}
+
+      {/* Modal info cálculo */}
+      {infoItem && (
+        <div
+          onClick={() => setInfoItem(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100 }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: "#fff", maxWidth: 520, width: "90%", borderRadius: 10, padding: "16px", boxShadow: "0 10px 30px rgba(0,0,0,0.4)" }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <h3 style={{ margin: 0 }}>Cómo calculamos el registro</h3>
+              <button onClick={() => setInfoItem(null)} style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer" }} aria-label="Cerrar">✕</button>
+            </div>
+            <p style={{ margin: "4px 0 10px", color: "#444" }}>
+              <strong>Grupo:</strong> {infoItem.muscleGroup || "-"} &nbsp;·&nbsp; <strong>Ejercicio:</strong> {infoItem.exercise || "-"}
+            </p>
+            <hr />
+            <div>
+              <p style={{ margin: "6px 0" }}>
+                <strong>Resultado:</strong> {infoItem._calcWeight !== "-" && infoItem._calcWeight != null ? `${infoItem._calcWeight} kg` : "-"}
+                {" "}
+                {infoItem._repsAvg !== "-" && infoItem._repsAvg != null ? `× ${infoItem._repsAvg} reps` : ""}
+                {infoItem._lastDay ? ` — ${formatDateLabel(infoItem._lastDay)}` : ""}
+              </p>
+              <p style={{ margin: "6px 0 8px" }}><strong>Series consideradas ese día:</strong></p>
+              {Array.isArray(infoItem._debugRows) && infoItem._debugRows.length > 0 ? (
+                <ul style={{ maxHeight: 220, overflow: "auto", paddingLeft: 18, margin: 0 }}>
+                  {infoItem._debugRows.map((r, idx) => (
+                    <li key={idx} style={{ margin: "2px 0" }}>
+                      {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "--:--"}
+                      {": "}
+                      <strong>{r.weight ?? '-'}</strong> kg × <strong>{r.reps ?? '-'}</strong> reps
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>No se han encontrado series para ese día.</p>
+              )}
+              <hr style={{ margin: "12px 0" }} />
+              <div>
+                <h4 style={{ margin: "6px 0" }}>Racional del cálculo</h4>
+                <p style={{ margin: 0, lineHeight: 1.5 }}>
+                  Para cada combinación <strong>grupo</strong> + <strong>ejercicio</strong> buscamos el <strong>último día</strong> en el que lo realizaste.
+                  De ese día tomamos todas las series y calculamos:
+                </p>
+                <ul style={{ marginTop: 6 }}>
+                  <li><strong>Reps medias</strong> = media aritmética de las repeticiones del día (si una serie no tiene reps, usamos 10).</li>
+                  <li><strong>Peso</strong> = sumatorio de <em>peso × reps</em> dividido por la suma total de reps del día. Redondeado a 1 decimal.</li>
+                </ul>
+              </div>
+            </div>
+            <div style={{ textAlign: "right", marginTop: 12 }}>
+              <button onClick={() => setInfoItem(null)} style={{ padding: "8px 12px", borderRadius: 6, border: "1px solid #ddd", background: "#f6f6f6", cursor: "pointer" }}>Cerrar</button>
+            </div>
+          </div>
         </div>
       )}
     </>
