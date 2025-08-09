@@ -1,3 +1,4 @@
+// src/App.js
 import "./App.css";
 import { useEffect, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
@@ -7,10 +8,12 @@ import ExerciseChart from "./components/ExerciseChart";
 import DangerZone from "./components/DangerZone";
 import Login from "./components/Login";
 import HistoryViewer from "./components/HistoryViewer";
+// import ExerciseMaster from "./components/ExerciseMaster";
 
 function App() {
   const [user, setUser] = useState(null);
-  const [view, setView] = useState("form"); // 'form' | 'chart' | 'danger' | 'history'
+  // 'form' | 'chart' | 'danger' | 'history' | 'master'
+  const [view, setView] = useState("form");
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
@@ -28,13 +31,15 @@ function App() {
   const renderView = () => {
     switch (view) {
       case "form":
-        return <ExerciseForm user={user} onViewChart={(exercise) => setView("chart")} />;
+        return <ExerciseForm user={user} onViewChart={() => setView("chart")} />;
       case "chart":
         return <ExerciseChart user={user} onBack={() => setView("form")} />;
       case "danger":
         return <DangerZone user={user} />;
       case "history":
         return <HistoryViewer user={user} onBack={() => setView("form")} />;
+      // case "master": // ⬅️ NUEVO
+        // return <ExerciseMaster user={user} onBack={() => setView("form")} />;
       default:
         return null;
     }
@@ -110,6 +115,9 @@ function App() {
         >
           Historial diario
         </button>
+
+        {/* ⬇️ NUEVO botón Maestro */}
+
       </div>
 
       <div

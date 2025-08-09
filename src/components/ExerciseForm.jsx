@@ -1,3 +1,4 @@
+// src/components/ExerciseForm.jsx
 import { useState, useEffect, useRef } from "react";
 import {
   collection,
@@ -8,39 +9,86 @@ import {
   orderBy,
   limit,
 } from "firebase/firestore";
-import { db } from "../firebase/config";
+import { db, storage } from "../firebase/config";
+import { ref, getDownloadURL } from "firebase/storage";
+
+const sanitize = (s) =>
+  (s || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s-]/g, "")
+    .replace(/\s+/g, "_");
+const imgPath = (muscleGroup, exercise) =>
+  `exerciseImages/${sanitize(muscleGroup)}__${sanitize(exercise)}.jpg`;
 
 const ExerciseForm = ({ user, onViewChart }) => {
   const [exercise, setExercise] = useState("");
   const [muscleGroup, setMuscleGroup] = useState("");
   const [allExercises, setAllExercises] = useState([]);
+
+  const muscleGroupInputRef = useRef(null);
   const exerciseInputRef = useRef(null);
+
   const [weight, setWeight] = useState("");
+  const [reps, setReps] = useState("");
+
   const [suggestions, setSuggestions] = useState([]);
   const [lastWeight, setLastWeight] = useState(null);
+  const [lastReps, setLastReps] = useState(null);
   const [lastTimestamp, setLastTimestamp] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null);
   const [summaryData, setSummaryData] = useState([]);
+
+  // Imagen del ejercicio (solo lectura)
+  const [imageUrl, setImageUrl] = useState(null);
+  const [showImg, setShowImg] = useState(false);
 
   useEffect(() => {
     if (!user) return;
     const fetchExercises = async () => {
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
+
       const all = snapshot.docs.map((doc) => ({
         exercise: doc.data().exercise,
         muscleGroup: doc.data().muscleGroup || "",
       }));
       setAllExercises(all);
+
       setSuggestions([...new Set(all.map((doc) => doc.exercise))].sort());
       fetchSummary(all);
     };
     fetchExercises();
   }, [user]);
 
+  // Cargar imagen si hay selección válida
   useEffect(() => {
-    if (!exercise || !user) return setLastWeight(null);
-    const fetchLastWeight = async () => {
+    const run = async () => {
+      if (!muscleGroup || !exercise) {
+        setImageUrl(null);
+        return;
+      }
+      try {
+        const url = await getDownloadURL(ref(storage, imgPath(muscleGroup, exercise)));
+        setImageUrl(url);
+      } catch {
+        setImageUrl(null);
+      }
+    };
+    run();
+  }, [muscleGroup, exercise]);
+
+  useEffect(() => {
+    if (!exercise || !user) {
+      setLastWeight(null);
+      setLastReps(null);
+      setLastTimestamp(null);
+      return;
+    }
+
+    const fetchLast = async () => {
       const q = query(
         collection(db, "workouts"),
         where("uid", "==", user.uid),
@@ -52,18 +100,26 @@ const ExerciseForm = ({ user, onViewChart }) => {
       const snapshot = await getDocs(q);
       if (!snapshot.empty) {
         const data = snapshot.docs[0].data();
-        setLastWeight(data.weight);
-        setLastTimestamp(new Date(data.timestamp.seconds * 1000).toLocaleString());
+        setLastWeight(data.weight ?? null);
+        setLastReps(data.reps ?? null);
+        setLastTimestamp(
+          data.timestamp?.seconds
+            ? new Date(data.timestamp.seconds * 1000).toLocaleString()
+            : data.timestamp?.toDate
+              ? data.timestamp.toDate().toLocaleString()
+              : null
+        );
       } else {
         setLastWeight(null);
+        setLastReps(null);
         setLastTimestamp(null);
       }
     };
-    fetchLastWeight();
+    fetchLast();
   }, [exercise, muscleGroup, user]);
 
   const fetchSummary = async (exerciseList) => {
-    // Keep all pairs (muscleGroup, exercise) as provided
+    // pares únicos (grupo + ejercicio)
     const uniquePairs = [];
     const seen = new Set();
     exerciseList.forEach((ex) => {
@@ -86,43 +142,61 @@ const ExerciseForm = ({ user, onViewChart }) => {
         );
         const snapshot = await getDocs(q);
         if (!snapshot.empty) {
-          // Ensure muscleGroup is included in summary
+          const d = snapshot.docs[0].data();
           return {
             exercise: ex.exercise,
-            weight: snapshot.docs[0].data().weight,
-            muscleGroup: snapshot.docs[0].data().muscleGroup || ex.muscleGroup || "",
+            muscleGroup: d.muscleGroup || ex.muscleGroup || "",
+            weight: d.weight ?? "-",
+            reps: d.reps ?? "-",
           };
         } else {
           return {
             exercise: ex.exercise,
-            weight: "-",
             muscleGroup: ex.muscleGroup || "",
+            weight: "-",
+            reps: "-",
           };
         }
       })
     );
+
     summaries.sort((a, b) => {
-      if (a.muscleGroup < b.muscleGroup) return -1;
-      if (a.muscleGroup > b.muscleGroup) return 1;
-      if (a.exercise < b.exercise) return -1;
-      if (a.exercise > b.exercise) return 1;
-      return 0;
+      const ga = (a.muscleGroup || "").toLowerCase();
+      const gb = (b.muscleGroup || "").toLowerCase();
+      if (ga !== gb) return ga.localeCompare(gb);
+      return a.exercise.toLowerCase().localeCompare(b.exercise.toLowerCase());
     });
+
     setSummaryData(summaries);
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!exercise || !weight) return;
+
+    // reps opcional, validar si viene
+    let repsNum = null;
+    if (reps !== "") {
+      const r = parseInt(reps, 10);
+      if (Number.isNaN(r) || r < 1 || r > 999) {
+        alert("Repeticiones debe ser un número entre 1 y 999");
+        return;
+      }
+      repsNum = r;
+    }
+
     try {
       await addDoc(collection(db, "workouts"), {
         exercise,
         muscleGroup,
         weight: parseFloat(weight),
+        reps: repsNum,
         timestamp: new Date(),
         uid: user.uid,
         userName: user.displayName || "Sin nombre",
       });
+
+      // refrescar sugerencias / resumen
       if (!suggestions.includes(exercise) && muscleGroup) {
         const filtered = allExercises
           .filter((ex) => ex.muscleGroup === muscleGroup)
@@ -134,10 +208,15 @@ const ExerciseForm = ({ user, onViewChart }) => {
       setAllExercises(updatedAll);
       fetchSummary(updatedAll);
 
+      // limpiar formulario
       setExercise("");
       setWeight("");
+      setReps("");
       setMuscleGroup("");
       setLastWeight(null);
+      setLastReps(null);
+      setLastTimestamp(null);
+      setImageUrl(null);
       setSaveStatus("ok");
       window.navigator.vibrate?.(150);
     } catch (err) {
@@ -147,13 +226,63 @@ const ExerciseForm = ({ user, onViewChart }) => {
     }
   };
 
+  // Limpieza completa al pulsar ✕ en grupo muscular (NO toca BBDD)
+  const handleClearMuscleGroup = () => {
+    setMuscleGroup("");
+    setExercise("");
+    setWeight("");
+    setReps("");
+    setLastWeight(null);
+    setLastReps(null);
+    setLastTimestamp(null);
+    setImageUrl(null);
+    setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
+    requestAnimationFrame(() => muscleGroupInputRef.current?.focus());
+  };
+
+  // Limpia solo el ejercicio (mantiene grupo)
+  const handleClearExercise = () => {
+    setExercise("");
+    setLastWeight(null);
+    setLastReps(null);
+    setLastTimestamp(null);
+    setImageUrl(null);
+    requestAnimationFrame(() => exerciseInputRef.current?.focus());
+  };
+
+  // Estilos
+  const fieldRowStyle = {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    marginBottom: "0.5rem",
+  };
+  const inputStyle = {
+    flex: 1,
+    padding: "16px",
+    fontSize: "1.1rem",
+    borderRadius: "8px",
+    border: "1px solid #ccc",
+  };
+  const clearBtnStyle = {
+    flexShrink: 0,
+    background: "#eee",
+    border: "none",
+    fontSize: "1.1rem",
+    cursor: "pointer",
+    padding: "8px 10px",
+    borderRadius: "6px",
+    lineHeight: 1,
+  };
+
   return (
     <>
       <form onSubmit={handleSubmit} style={{ maxWidth: "400px", margin: "2rem auto", padding: "0 1rem" }}>
         <h2>Registrar ejercicio</h2>
 
+        {/* Grupo muscular */}
         <label htmlFor="muscleGroup">Grupo muscular:</label>
-        <div style={{ position: "relative" }}>
+        <div style={fieldRowStyle}>
           <input
             id="muscleGroup"
             list="muscle-group-list"
@@ -169,33 +298,16 @@ const ExerciseForm = ({ user, onViewChart }) => {
             placeholder="Pectoral, Pierna, Espalda..."
             inputMode="text"
             autoComplete="on"
-            style={{
-              width: "100%",
-              padding: "16px",
-              fontSize: "1.1rem",
-              borderRadius: "8px",
-              border: "1px solid #ccc",
-              marginBottom: "0.5rem",
-            }}
+            ref={muscleGroupInputRef}
+            style={inputStyle}
           />
           {muscleGroup && (
             <button
               type="button"
-              onClick={() => setMuscleGroup("")}
-              style={{
-                position: "absolute",
-                right: "10px",
-                top: "50%",
-                transform: "translateY(-50%)",
-                background: "transparent",
-                border: "none",
-                fontSize: "1.2rem",
-                cursor: "pointer",
-                color: "#999",
-                padding: 0,
-                lineHeight: 1,
-              }}
-              aria-label="Clear muscle group"
+              onClick={handleClearMuscleGroup}
+              style={clearBtnStyle}
+              aria-label="Limpiar grupo muscular (y ejercicio, peso y reps)"
+              title="Limpiar grupo muscular (y ejercicio, peso y reps)"
             >
               ✕
             </button>
@@ -209,8 +321,9 @@ const ExerciseForm = ({ user, onViewChart }) => {
             ))}
         </datalist>
 
+        {/* Ejercicio + Lupa */}
         <label htmlFor="exercise">Ejercicio:</label>
-        <div style={{ position: "relative" }}>
+        <div style={fieldRowStyle}>
           <input
             id="exercise"
             list="exercise-list"
@@ -219,29 +332,30 @@ const ExerciseForm = ({ user, onViewChart }) => {
             placeholder="Escribe o selecciona"
             inputMode="text"
             autoComplete="on"
-            style={{ width: "100%", padding: "16px", fontSize: "1.1rem", borderRadius: "8px", border: "1px solid #ccc", marginBottom: "0.5rem" }}
+            style={inputStyle}
             ref={exerciseInputRef}
           />
           {exercise && (
             <button
               type="button"
-              onClick={() => setExercise("")}
-              style={{
-                position: "absolute",
-                right: "10px",
-                top: "50%",
-                transform: "translateY(-50%)",
-                background: "transparent",
-                border: "none",
-                fontSize: "1.2rem",
-                cursor: "pointer",
-                color: "#999",
-                padding: 0,
-                lineHeight: 1,
-              }}
-              aria-label="Clear exercise"
+              onClick={handleClearExercise}
+              style={clearBtnStyle}
+              aria-label="Limpiar ejercicio"
+              title="Limpiar ejercicio"
             >
               ✕
+            </button>
+          )}
+          {/* Lupa: visible solo si hay imagen */}
+          {imageUrl && (
+            <button
+              type="button"
+              onClick={() => setShowImg(true)}
+              style={{ ...clearBtnStyle, background: "#ddd" }}
+              title="Ver foto del ejercicio"
+              aria-label="Ver foto del ejercicio"
+            >
+              🔍
             </button>
           )}
         </div>
@@ -251,13 +365,18 @@ const ExerciseForm = ({ user, onViewChart }) => {
           ))}
         </datalist>
 
-        {lastWeight !== null && (
+        {/* Último registro */}
+        {(lastWeight !== null || lastReps !== null) && (
           <p style={{ fontSize: "0.9rem", color: "gray" }}>
-            Último peso registrado: <strong>{lastWeight} kg</strong><br />
-            Fecha: <strong>{lastTimestamp}</strong>
+            Último registro:{" "}
+            <strong>
+              {lastWeight !== null ? `${lastWeight} kg` : "-"}{lastReps !== null ? ` × ${lastReps} reps` : ""}
+            </strong>
+            {lastTimestamp && <> — <strong>{lastTimestamp}</strong></>}
           </p>
         )}
 
+        {/* Peso */}
         <label htmlFor="weight">Peso (kg):</label>
         <input
           id="weight"
@@ -266,6 +385,20 @@ const ExerciseForm = ({ user, onViewChart }) => {
           onChange={(e) => setWeight(e.target.value)}
           placeholder="Peso en kg"
           inputMode="decimal"
+          style={{ width: "100%", padding: "16px", fontSize: "1.1rem", borderRadius: "8px", border: "1px solid #ccc", marginBottom: "0.75rem" }}
+        />
+
+        {/* Reps */}
+        <label htmlFor="reps">Repeticiones:</label>
+        <input
+          id="reps"
+          type="number"
+          value={reps}
+          onChange={(e) => setReps(e.target.value)}
+          placeholder="Ej: 8, 10, 12…"
+          inputMode="numeric"
+          min={1}
+          max={999}
           style={{ width: "100%", padding: "16px", fontSize: "1.1rem", borderRadius: "8px", border: "1px solid #ccc", marginBottom: "1rem" }}
         />
 
@@ -274,9 +407,16 @@ const ExerciseForm = ({ user, onViewChart }) => {
         {saveStatus === "nok" && <p style={{ color: "red", marginTop: "0.5rem" }}>❌ Error al guardar</p>}
 
         {exercise && (
-          <button type="button" onClick={() => onViewChart(exercise)} style={{ width: "100%", marginTop: "0.5rem", backgroundColor: "#eee", padding: "10px", fontSize: "1rem" }}>Ver progreso</button>
+          <button
+            type="button"
+            onClick={() => onViewChart(exercise)}
+            style={{ width: "100%", marginTop: "0.5rem", backgroundColor: "#eee", padding: "10px", fontSize: "1rem" }}
+          >
+            Ver progreso
+          </button>
         )}
 
+        {/* Resumen */}
         <div style={{ overflowX: "auto", marginTop: "2rem" }}>
           <h3>Resumen de ejercicios</h3>
           <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "2rem" }}>
@@ -284,7 +424,8 @@ const ExerciseForm = ({ user, onViewChart }) => {
               <tr>
                 <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem" }}>Grupo</th>
                 <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem" }}>Ejercicio</th>
-                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem", textAlign: "center" }}>Último peso (kg)</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem", textAlign: "center" }}>Último peso</th>
+                <th style={{ borderBottom: "1px solid #ccc", padding: "0.5rem", textAlign: "center" }}>Últimas reps</th>
               </tr>
             </thead>
             <tbody>
@@ -316,12 +457,32 @@ const ExerciseForm = ({ user, onViewChart }) => {
                   <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem", textAlign: "center" }}>
                     {item.weight}
                   </td>
+                  <td style={{ borderBottom: "1px solid #eee", padding: "0.5rem", textAlign: "center" }}>
+                    {item.reps}
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </form>
+
+      {/* Modal imagen */}
+      {showImg && imageUrl && (
+        <div
+          onClick={() => setShowImg(false)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
+          }}
+        >
+          <img
+            src={imageUrl}
+            alt="Ejercicio"
+            style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.5)" }}
+          />
+        </div>
+      )}
     </>
   );
 };
