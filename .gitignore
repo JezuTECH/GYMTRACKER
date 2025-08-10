@@ -22,3 +22,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .firebase/
+
+client_secret_*.json
+*.pem
+*.p12
