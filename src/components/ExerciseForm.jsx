@@ -65,6 +65,106 @@ const ExerciseForm = ({ user, onViewChart }) => {
     fetchExercises();
   }, [user]);
 
+  // Helper: recompute latest-day stats for current selection
+  const recomputeLastForSelection = async () => {
+    if (!exercise || !muscleGroup || !user) {
+      setLastWeight(null);
+      setLastReps(null);
+      setLastTimestamp(null);
+      setHeaderInfo(null);
+      return;
+    }
+
+    const q = query(
+      collection(db, "workouts"),
+      where("uid", "==", user.uid),
+      where("exercise", "==", exercise),
+      where("muscleGroup", "==", muscleGroup),
+      orderBy("timestamp", "desc"),
+      limit(50)
+    );
+    const snapshot = await getDocs(q);
+    if (snapshot.empty) {
+      setLastWeight(null);
+      setLastReps(null);
+      setLastTimestamp(null);
+      setHeaderInfo(null);
+      return;
+    }
+
+    const toJsDate = (t) =>
+      t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
+    const pad2 = (n) => String(n).padStart(2, "0");
+    const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+    const docs = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
+
+    let latestKey = null;
+    let latestDate = null;
+    for (const d of docs) {
+      const dt = toJsDate(d.timestamp);
+      if (!dt) continue;
+      const key = keyForDay(dt);
+      if (!latestDate || dt > latestDate) {
+        latestDate = dt;
+        latestKey = key;
+      }
+    }
+
+    const docsOfDay = docs.filter((d) => {
+      const dt = toJsDate(d.timestamp);
+      return dt && keyForDay(dt) === latestKey;
+    });
+
+    if (!docsOfDay.length) {
+      setLastWeight(null);
+      setLastReps(null);
+      setLastTimestamp(null);
+      setHeaderInfo(null);
+      return;
+    }
+
+    let wrSum = 0;
+    let repsSum = 0;
+    let repsSumForAvg = 0;
+    let count = 0;
+
+    docsOfDay.forEach((d) => {
+      const w = typeof d.weight === "number" ? d.weight : 0;
+      const r = typeof d.reps === "number" && d.reps > 0 ? d.reps : 10; // default 10
+      wrSum += w * r;
+      repsSum += r;
+      repsSumForAvg += r;
+      count += 1;
+    });
+
+    const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : null;
+    const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : null;
+
+    setLastWeight(calcWeight ?? null);
+    setLastReps(repsAvg ?? null);
+    setLastTimestamp(latestDate ? latestDate.toLocaleString() : null);
+
+    const debugRowsHeader = docsOfDay.map((d) => {
+      const t = d.timestamp?.toDate ? d.timestamp.toDate() : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
+      return {
+        weight: typeof d.weight === "number" ? d.weight : null,
+        reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
+        timestamp: t
+      };
+    });
+    setHeaderInfo({
+      exercise,
+      muscleGroup,
+      weight: calcWeight ?? "-",
+      reps: repsAvg ?? "-",
+      _lastDay: latestDate || null,
+      _calcWeight: calcWeight ?? null,
+      _repsAvg: repsAvg ?? null,
+      _debugRows: debugRowsHeader
+    });
+  };
+
   // Cargar imagen si hay selección válida
   useEffect(() => {
     const run = async () => {
@@ -90,106 +190,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
       setHeaderInfo(null);
       return;
     }
-
-    // Nueva lógica: obtener el último día registrado y calcular repsAvg y calcWeight
-    const fetchLast = async () => {
-      const q = query(
-        collection(db, "workouts"),
-        where("uid", "==", user.uid),
-        where("exercise", "==", exercise),
-        where("muscleGroup", "==", muscleGroup),
-        orderBy("timestamp", "desc"),
-        limit(50)
-      );
-      const snapshot = await getDocs(q);
-      if (snapshot.empty) {
-        setLastWeight(null);
-        setLastReps(null);
-        setLastTimestamp(null);
-        setHeaderInfo(null);
-        return;
-      }
-
-      // Helpers
-      const toJsDate = (t) =>
-        t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
-      const pad2 = (n) => String(n).padStart(2, "0");
-      const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-
-      const docs = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
-
-      // Determine latest day key (local day)
-      let latestKey = null;
-      let latestDate = null;
-      for (const d of docs) {
-        const dt = toJsDate(d.timestamp);
-        if (!dt) continue;
-        const key = keyForDay(dt);
-        if (!latestDate || dt > latestDate) {
-          latestDate = dt;
-          latestKey = key;
-        }
-      }
-
-      // Filter docs of that day
-      const docsOfDay = docs.filter((d) => {
-        const dt = toJsDate(d.timestamp);
-        return dt && keyForDay(dt) === latestKey;
-      });
-
-      if (!docsOfDay.length) {
-        setLastWeight(null);
-        setLastReps(null);
-        setLastTimestamp(null);
-        setHeaderInfo(null);
-        return;
-      }
-
-      // Compute:
-      // - repsUsed = reps if present/valid, else 10 (default)
-      // - calcWeight = sum(weight * repsUsed) / sum(repsUsed)   (1 decimal)
-      // - repsAvg    = arithmetic mean of repsUsed (rounded)
-      let wrSum = 0;
-      let repsSum = 0;
-      let repsSumForAvg = 0;
-      let count = 0;
-
-      docsOfDay.forEach((d) => {
-        const w = typeof d.weight === "number" ? d.weight : 0;
-        const r = typeof d.reps === "number" && d.reps > 0 ? d.reps : 10; // default 10
-        wrSum += w * r;
-        repsSum += r;
-        repsSumForAvg += r;
-        count += 1;
-      });
-
-      const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : null;
-      const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : null;
-
-      setLastWeight(calcWeight ?? null);
-      setLastReps(repsAvg ?? null);
-      setLastTimestamp(latestDate ? latestDate.toLocaleString() : null);
-      // preparar info para el modal desde la selección actual (cabecera)
-      const debugRowsHeader = docsOfDay.map((d) => {
-        const t = d.timestamp?.toDate ? d.timestamp.toDate() : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
-        return {
-          weight: typeof d.weight === "number" ? d.weight : null,
-          reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
-          timestamp: t
-        };
-      });
-      setHeaderInfo({
-        exercise,
-        muscleGroup,
-        weight: calcWeight ?? "-",
-        reps: repsAvg ?? "-",
-        _lastDay: latestDate || null,
-        _calcWeight: calcWeight ?? null,
-        _repsAvg: repsAvg ?? null,
-        _debugRows: debugRowsHeader
-      });
-    };
-    fetchLast();
+    recomputeLastForSelection();
   }, [exercise, muscleGroup, user]);
 
   const fetchSummary = async (exerciseList) => {
@@ -338,6 +339,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
         timestamp: new Date(),
         uid: user.uid,
         userName: user.displayName || "Sin nombre",
+        email: user.email || null,
       });
 
       // refrescar sugerencias / resumen
@@ -352,17 +354,14 @@ const ExerciseForm = ({ user, onViewChart }) => {
       setAllExercises(updatedAll);
       fetchSummary(updatedAll);
 
-      // limpiar formulario
-      setExercise("");
+      // limpiar lo justo: mantener grupo y ejercicio para facilitar series consecutivas
       setWeight("");
       setReps("");
-      setMuscleGroup("");
-      setLastWeight(null);
-      setLastReps(null);
-      setLastTimestamp(null);
-      setImageUrl(null);
       setSaveStatus("ok");
       window.navigator.vibrate?.(150);
+
+      // Recalcular resumen de cabecera (último día) para la selección actual
+      await recomputeLastForSelection();
     } catch (err) {
       console.error("Error al guardar:", err);
       setSaveStatus("nok");
