@@ -1,33 +1,55 @@
 // src/components/ExerciseMaster.jsx
 import { useEffect, useRef, useState } from "react";
 import { collection, doc, getDocs, query, setDoc, where, deleteDoc, getDoc } from "firebase/firestore";
-import { signInWithPopup } from "firebase/auth";
+import { reauthenticateWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { db, auth, googleProvider } from "../firebase/config";
+
+// Cache de token Drive (evita pedir permisos cada vez)
+let __driveToken = null;        // string
+let __driveTokenExp = 0;        // epoch millis
+const DRIVE_TOKEN_TTL_FALLBACK_MS = 45 * 60 * 1000; // 45 min si no viene expiración
 
 const sanitize = (s = "") =>
   String(s).trim().toLowerCase().replace(/[^a-z0-9\-_. ]+/g, "").replace(/\s+/g, "_").slice(0, 80);
 
 const docKeyFor = (mg, ex) => `${sanitize(mg)}__${sanitize(ex)}`;
 
-// Devuelve un token OAuth de Google con permiso drive.file (pide popup si hace falta)
+// Devuelve un token OAuth de Google con permiso drive.file (usa reauthenticate para no cambiar sesión)
 async function ensureDriveAccessToken() {
-  // Reautenticamos con el mismo provider (trae scope drive.file) para obtener accessToken
-  const result = await signInWithPopup(auth, googleProvider);
-  const cred = (window.firebase?.auth?.GoogleAuthProvider?.credentialFromResult)
-    ? window.firebase.auth.GoogleAuthProvider.credentialFromResult(result)
-    : null;
+  if (!auth.currentUser) {
+    throw new Error("No hay usuario autenticado.");
+  }
 
-  // En el SDK modular, el token viene en result._tokenResponse.oauthAccessToken (no público, pero práctico)
+  // 1) Si tenemos token en caché y no ha expirado, úsalo
+  const now = Date.now();
+  if (__driveToken && now < __driveTokenExp) {
+    return __driveToken;
+  }
+
+  // 2) Reautenticar (solicita el scope Drive si aún no fue concedido)
+  const result = await reauthenticateWithPopup(auth.currentUser, googleProvider);
+
+  // 3) Extraer token y expiración
+  const credential = GoogleAuthProvider.credentialFromResult(result);
   const token =
-    cred?.accessToken ||
+    credential?.accessToken ||
     result?._tokenResponse?.oauthAccessToken ||
-    result?.user?.stsTokenManager?.accessToken || // fallback (no suele servir para Drive)
     null;
+
+  // Algunos navegadores no devuelven expiresIn; si existe, úsalo, si no, usa fallback 45 min
+  const expiresInSec = Number(result?._tokenResponse?.oauthExpireIn || result?._tokenResponse?.expiresIn || 0);
+  const ttl = Number.isFinite(expiresInSec) && expiresInSec > 0
+    ? expiresInSec * 1000
+    : DRIVE_TOKEN_TTL_FALLBACK_MS;
 
   if (!token) {
     throw new Error("No se pudo obtener el token de Google Drive.");
   }
-  return token;
+
+  // 4) Cachear token en memoria (y dejarlo listo para próximas llamadas)
+  __driveToken = token;
+  __driveTokenExp = Date.now() + ttl - 10_000; // pequeño margen de 10s
+  return __driveToken;
 }
 
 // Sube a Drive con uploadType=multipart y devuelve { id, webViewLink, thumbnailLink }
@@ -179,6 +201,7 @@ const ExerciseMaster = ({ user, onBack }) => {
     try {
       // 1) Asegurar token Drive
       const accessToken = await ensureDriveAccessToken();
+      console.log("[Drive] usando token. exp en:", new Date(__driveTokenExp).toLocaleTimeString());
 
       // 2) Subir (nota: Drive no da progreso por streaming con fetch; mostramos estados sintéticos)
       setProgressText("Subiendo a Google Drive…");
@@ -200,7 +223,8 @@ const ExerciseMaster = ({ user, onBack }) => {
       setProgressText("Subida completada.");
     } catch (e) {
       console.error(e);
-      alert("No se pudo subir la imagen.");
+      const msg = (e && e.message) ? String(e.message).slice(0, 300) : "Error desconocido";
+      alert("No se pudo subir la imagen.\n" + msg);
       setProgressText("");
     } finally {
       setUploading(false);
@@ -214,6 +238,7 @@ const ExerciseMaster = ({ user, onBack }) => {
     if (!window.confirm("¿Eliminar la imagen de este ejercicio de tu Google Drive?")) return;
     try {
       const accessToken = await ensureDriveAccessToken();
+      console.log("[Drive] usando token. exp en:", new Date(__driveTokenExp).toLocaleTimeString());
       await deleteFromDrive(accessToken, record.fileId);
       const dref = doc(db, "users", user.uid, "exerciseMaster", docKeyFor(muscleGroup, exercise));
       await deleteDoc(dref);

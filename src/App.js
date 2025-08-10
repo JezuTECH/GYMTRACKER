@@ -1,50 +1,24 @@
+// src/App.js
 import "./App.css";
 import { useEffect, useState } from "react";
-import { onAuthStateChanged, signOut, getRedirectResult } from "firebase/auth";
+import { onAuthStateChanged, signOut } from "firebase/auth";
 import { auth } from "./firebase/config";
 import ExerciseForm from "./components/ExerciseForm";
 import ExerciseChart from "./components/ExerciseChart";
 import DangerZone from "./components/DangerZone";
 import Login from "./components/Login";
 import HistoryViewer from "./components/HistoryViewer";
+// import ExerciseMaster from "./components/ExerciseMaster";
 
 function App() {
   const [user, setUser] = useState(null);
-  const [authReady, setAuthReady] = useState(false);
+  // 'form' | 'chart' | 'danger' | 'history' | 'master'
   const [view, setView] = useState("form");
 
-  // Flag que marcamos desde Login cuando lanzamos signInWithRedirect
-  const loginInProgress = localStorage.getItem("loginInProgress") === "true";
-
   useEffect(() => {
-    // 1) Procesa el resultado del redirect. Si viene un usuario, marcamos un flag
-    // en sessionStorage para forzar un reload en PWA iOS y evitar quedarse en la pantalla de login.
-    getRedirectResult(auth)
-      .then((res) => {
-        if (res && res.user) {
-          sessionStorage.setItem("justRedirected", "true");
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        localStorage.removeItem("loginInProgress");
-      });
-
-    // 2) Suscripción a cambios de sesión
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(firebaseUser);
-      setAuthReady(true);
-
-      // Si venimos de redirect y ya tenemos usuario, recarga dura en PWA iOS
-      if (firebaseUser && sessionStorage.getItem("justRedirected") === "true") {
-        sessionStorage.removeItem("justRedirected");
-        // Evita que la app se quede "conectado" en el marcador de iOS
-        try {
-          window.location.replace("/");
-        } catch (_) {}
-      }
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
     });
-
     return () => unsubscribe();
   }, []);
 
@@ -52,12 +26,6 @@ function App() {
     signOut(auth);
   };
 
-  // Mientras no esté lista la autenticación o el login siga en progreso
-  if (!authReady || loginInProgress) {
-    return <div style={{ textAlign: "center", marginTop: "3rem" }}>Cargando…</div>;
-  }
-
-  // Si no hay usuario, mostramos Login
   if (!user) return <Login />;
 
   const renderView = () => {
@@ -70,25 +38,19 @@ function App() {
         return <DangerZone user={user} />;
       case "history":
         return <HistoryViewer user={user} onBack={() => setView("form")} />;
+      // case "master": // ⬅️ NUEVO
+        // return <ExerciseMaster user={user} onBack={() => setView("form")} />;
       default:
         return null;
     }
   };
 
   return (
-    <div
-      className="App"
-      style={{
-        fontFamily: "Arial, sans-serif",
-        padding: "1rem",
-        maxWidth: "700px",
-        margin: "0 auto",
-      }}
-    >
+    <div className="App" style={{ fontFamily: "Arial, sans-serif", padding: "1rem", maxWidth: "700px", margin: "0 auto" }}>
       <h1 style={{ textAlign: "center" }}>Gym Tracker</h1>
 
       <p style={{ textAlign: "center" }}>
-        Bienvenido <strong>{user?.displayName || user?.email || "Usuario"}</strong>{" "}
+        Bienvenido <strong>{user.displayName}</strong>{" "}
         <button
           onClick={handleLogout}
           style={{ marginLeft: "1rem", padding: "6px 12px", fontSize: "14px" }}
@@ -116,7 +78,7 @@ function App() {
             border: "none",
             cursor: "pointer",
             flex: "1 0 30%",
-            minWidth: "100px",
+            minWidth: "100px"
           }}
         >
           Registro
@@ -132,7 +94,7 @@ function App() {
             border: "none",
             cursor: "pointer",
             flex: "1 0 30%",
-            minWidth: "100px",
+            minWidth: "100px"
           }}
         >
           Ver progreso
@@ -148,11 +110,14 @@ function App() {
             border: "none",
             cursor: "pointer",
             flex: "1 0 30%",
-            minWidth: "100px",
+            minWidth: "100px"
           }}
         >
           Historial diario
         </button>
+
+        {/* ⬇️ NUEVO botón Maestro */}
+
       </div>
 
       <div
@@ -161,7 +126,7 @@ function App() {
           display: "flex",
           justifyContent: "flex-start",
           padding: "0 1rem",
-          marginTop: "2rem",
+          marginTop: "2rem"
         }}
       >
         <button
@@ -177,7 +142,7 @@ function App() {
             display: "flex",
             alignItems: "center",
             gap: "8px",
-            width: "200px",
+            width: "200px"
           }}
         >
           🗑️ Reseteo de datos

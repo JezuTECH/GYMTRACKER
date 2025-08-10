@@ -4,15 +4,14 @@ import {
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
-  onAuthStateChanged,
 } from "firebase/auth";
 import { auth, googleProvider } from "../firebase/config";
 
-const isIOS = /iPad|iPhone|iPod/.test(
-  typeof navigator !== "undefined"
-    ? navigator.userAgent || navigator.vendor || ""
-    : ""
-);
+const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+const isAndroid = /Android/i.test(ua);
+const isIOS = /iPad|iPhone|iPod/.test(ua);
+const isMobile = isAndroid || isIOS;
+// PWA standalone check (iOS)
 const isStandalone =
   typeof navigator !== "undefined" &&
   "standalone" in navigator &&
@@ -20,55 +19,82 @@ const isStandalone =
 
 export default function Login() {
   const [status, setStatus] = useState("Esperando…");
+  const [lastError, setLastError] = useState("");
 
-  // Si volvemos de redirect, limpia el flag
+  // Al volver del redirect, procesa y limpia flag
   useEffect(() => {
     getRedirectResult(auth)
-      .catch(() => {}) // silencioso
+      .then((res) => {
+        if (res?.user) setStatus("Sesión iniciada");
+      })
+      .catch((err) => {
+        console.error("getRedirectResult error:", err);
+        setLastError(err?.message || String(err));
+        setStatus("Error tras volver de Google");
+      })
       .finally(() => {
-        localStorage.removeItem("loginInProgress");
+        try { localStorage.removeItem("loginInProgress"); } catch {}
       });
   }, []);
 
-  // En cuanto haya usuario, recarga para que App lo capte (fix iOS PWA)
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      if (u) {
-        setStatus("Conectado");
-        // En PWA iOS a veces no rehidrata hasta recargar
-        window.location.replace("/");
-      } else {
-        setStatus("Esperando login");
-      }
-    });
-    return () => unsub();
-  }, []);
+  const handleLogin = async () => {
+    setStatus("Iniciando sesión…");
+    setLastError("");
 
-  const handleGoogleLogin = async () => {
-    try {
-      if (isIOS && isStandalone) {
-        localStorage.setItem("loginInProgress", "true");
+    // En móvil (Android/iOS) usa redirect por fiabilidad
+    // En iOS PWA (standalone) ES OBLIGATORIO redirect
+    const mustRedirect = isMobile || isStandalone;
+
+    if (mustRedirect) {
+      try {
+        try { localStorage.setItem("loginInProgress", "true"); } catch {}
         await signInWithRedirect(auth, googleProvider);
-      } else {
-        await signInWithPopup(auth, googleProvider);
+      } catch (err) {
+        console.error("signInWithRedirect error:", err);
+        setLastError(err?.message || String(err));
+        setStatus("No se pudo redirigir a Google");
       }
-    } catch (err) {
-      console.error("Error al iniciar sesión:", err);
-      setStatus("Error al iniciar sesión");
+      return;
+    }
+
+    // En desktop: intenta popup y cae a redirect si falla
+    try {
+      await signInWithPopup(auth, googleProvider);
+      setStatus("Sesión iniciada con popup");
+    } catch (popupErr) {
+      console.warn("Popup falló, uso redirect. Motivo:", popupErr?.message);
+      try {
+        try { localStorage.setItem("loginInProgress", "true"); } catch {}
+        await signInWithRedirect(auth, googleProvider);
+      } catch (redirectErr) {
+        console.error("Redirect también falló:", redirectErr);
+        setLastError(redirectErr?.message || String(redirectErr));
+        setStatus("Error al iniciar sesión");
+        alert("No se pudo iniciar sesión. Prueba a borrar caché/cookies y vuelve a intentarlo.");
+      }
     }
   };
 
   return (
-    <div style={{ textAlign: "center", marginTop: "4rem" }}>
-      <h1>Gym Tracker</h1>
-      <p>Inicia sesión para continuar</p>
+    <div style={{ textAlign: "center", marginTop: "4rem", padding: "1rem", maxWidth: 520, marginInline: "auto" }}>
+      <h2 style={{ fontSize: "1.8rem", marginBottom: "1rem" }}>Inicia sesión en <strong>Gym Tracker</strong></h2>
       <button
-        onClick={handleGoogleLogin}
-        style={{ padding: "10px 16px", borderRadius: "6px", fontSize: "14px", cursor: "pointer" }}
+        onClick={handleLogin}
+        style={{ padding: "12px 20px", fontSize: 16, borderRadius: 8, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}
       >
         Continuar con Google
       </button>
-      <p style={{ marginTop: "1rem", color: "gray" }}>{status}</p>
+      <p style={{ marginTop: 10, color: "#666" }}>{status}</p>
+      {lastError && (
+        <p style={{ marginTop: 6, color: "#b00020", fontSize: 13 }}>
+          Detalle: {lastError}
+        </p>
+      )}
+      {(isIOS && isStandalone) && (
+        <p style={{ marginTop: 8, fontSize: 13, color: "#999" }}>
+          Si tras volver de Google no entra, cierra y reabre la app del escritorio.
+        </p>
+      )}
     </div>
   );
 }

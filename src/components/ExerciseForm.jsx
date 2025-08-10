@@ -9,19 +9,7 @@ import {
   orderBy,
   limit,
 } from "firebase/firestore";
-import { db, storage } from "../firebase/config";
-import { ref, getDownloadURL } from "firebase/storage";
-
-const sanitize = (s) =>
-  (s || "")
-    .trim()
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^\w\s-]/g, "")
-    .replace(/\s+/g, "_");
-const imgPath = (muscleGroup, exercise) =>
-  `exerciseImages/${sanitize(muscleGroup)}__${sanitize(exercise)}.jpg`;
+import { db } from "../firebase/config";
 
 const ExerciseForm = ({ user, onViewChart }) => {
   const [exercise, setExercise] = useState("");
@@ -42,10 +30,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
   const [summaryData, setSummaryData] = useState([]);
   const [infoItem, setInfoItem] = useState(null);
   const [headerInfo, setHeaderInfo] = useState(null);
-
-  // Imagen del ejercicio (solo lectura)
-  const [imageUrl, setImageUrl] = useState(null);
-  const [showImg, setShowImg] = useState(false);
 
   useEffect(() => {
     if (!user) return;
@@ -75,7 +59,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
       return;
     }
 
-    const q = query(
+    const qSel = query(
       collection(db, "workouts"),
       where("uid", "==", user.uid),
       where("exercise", "==", exercise),
@@ -83,7 +67,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
       orderBy("timestamp", "desc"),
       limit(50)
     );
-    const snapshot = await getDocs(q);
+    const snapshot = await getDocs(qSel);
     if (snapshot.empty) {
       setLastWeight(null);
       setLastReps(null);
@@ -165,23 +149,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
     });
   };
 
-  // Cargar imagen si hay selección válida
-  useEffect(() => {
-    const run = async () => {
-      if (!muscleGroup || !exercise) {
-        setImageUrl(null);
-        return;
-      }
-      try {
-        const url = await getDownloadURL(ref(storage, imgPath(muscleGroup, exercise)));
-        setImageUrl(url);
-      } catch {
-        setImageUrl(null);
-      }
-    };
-    run();
-  }, [muscleGroup, exercise]);
-
   useEffect(() => {
     if (!exercise || !user) {
       setLastWeight(null);
@@ -208,7 +175,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
     const summaries = await Promise.all(
       uniquePairs.map(async (ex) => {
         // Buscar los últimos 50 registros para ese ejercicio/grupo
-        const q = query(
+        const qPair = query(
           collection(db, "workouts"),
           where("uid", "==", user.uid),
           where("exercise", "==", ex.exercise),
@@ -216,7 +183,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
           orderBy("timestamp", "desc"),
           limit(50)
         );
-        const snapshot = await getDocs(q);
+        const snapshot = await getDocs(qPair);
         if (!snapshot.empty) {
           // Helpers
           const toJsDate = (t) =>
@@ -378,7 +345,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
     setLastWeight(null);
     setLastReps(null);
     setLastTimestamp(null);
-    setImageUrl(null);
     setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
     requestAnimationFrame(() => muscleGroupInputRef.current?.focus());
   };
@@ -389,7 +355,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
     setLastWeight(null);
     setLastReps(null);
     setLastTimestamp(null);
-    setImageUrl(null);
     requestAnimationFrame(() => exerciseInputRef.current?.focus());
   };
 
@@ -475,7 +440,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
             ))}
         </datalist>
 
-        {/* Ejercicio + Lupa */}
+        {/* Ejercicio */}
         <label htmlFor="exercise">Ejercicio:</label>
         <div style={fieldRowStyle}>
           <input
@@ -498,18 +463,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
               title="Limpiar ejercicio"
             >
               ✕
-            </button>
-          )}
-          {/* Lupa: visible solo si hay imagen */}
-          {imageUrl && (
-            <button
-              type="button"
-              onClick={() => setShowImg(true)}
-              style={{ ...clearBtnStyle, background: "#ddd" }}
-              title="Ver foto del ejercicio"
-              aria-label="Ver foto del ejercicio"
-            >
-              🔍
             </button>
           )}
         </div>
@@ -617,7 +570,7 @@ const ExerciseForm = ({ user, onViewChart }) => {
                   onClick={() => {
                     setExercise(item.exercise);
                     setMuscleGroup(item.muscleGroup);
-                    // También actualizar lastWeight, lastReps, lastTimestamp con los valores calculados
+                    // Actualizar cabecera con valores calculados
                     setLastWeight(item._calcWeight && item._calcWeight !== "-" ? item._calcWeight : null);
                     setLastReps(item._repsAvg && item._repsAvg !== "-" ? item._repsAvg : null);
                     setLastTimestamp(
@@ -679,23 +632,6 @@ const ExerciseForm = ({ user, onViewChart }) => {
           </table>
         </div>
       </form>
-
-      {/* Modal imagen */}
-      {showImg && imageUrl && (
-        <div
-          onClick={() => setShowImg(false)}
-          style={{
-            position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
-            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000,
-          }}
-        >
-          <img
-            src={imageUrl}
-            alt="Ejercicio"
-            style={{ maxWidth: "90vw", maxHeight: "90vh", borderRadius: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.5)" }}
-          />
-        </div>
-      )}
 
       {/* Modal info cálculo */}
       {infoItem && (
