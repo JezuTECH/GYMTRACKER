@@ -138,7 +138,8 @@ const ExerciseChart = ({ user, onBack }) => {
           .map((b) => {
             const avgWeighted = b.repsSumForWeight > 0 ? Number((b.wrSum / b.repsSumForWeight).toFixed(1)) : null;
             const repsAvg = b.rCount > 0 ? Math.round(b.rSum / b.rCount) : null;
-            return { x: b.day, y: avgWeighted, repsAvg };
+            const x = b.day.getTime();
+            return { x, y: avgWeighted, repsAvg };
           })
           .filter((p) => p.y !== null)
           .sort((a, b) => a.x - b.x);
@@ -312,7 +313,7 @@ const ExerciseChart = ({ user, onBack }) => {
             <ul style={{ marginTop: "0.25rem" }}>
               {pointsByDay.map((p, i) => (
                 <li key={i}>
-                  {p.x.toLocaleDateString()} — {p.y} kg — {p.repsAvg ?? "-"} reps
+                  {new Date(p.x).toLocaleDateString()} — {p.y} kg — {p.repsAvg ?? "-"} reps
                 </li>
               ))}
             </ul>

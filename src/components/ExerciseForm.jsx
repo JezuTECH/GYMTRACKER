@@ -9,7 +9,7 @@ import {
   orderBy,
   limit,
 } from "firebase/firestore";
-import { db } from "../firebase/config";
+import { db, auth } from "../firebase/config";
 
 const ExerciseForm = ({ user, onViewChart }) => {
   const [exercise, setExercise] = useState("");
@@ -297,6 +297,14 @@ const ExerciseForm = ({ user, onViewChart }) => {
       repsNum = r;
     }
 
+    // Cambio por incidencia android
+    const uid = user?.uid || auth.currentUser?.uid;
+if (!uid) {
+  alert("No hay sesión activa. Vuelve a iniciar sesión y prueba de nuevo.");
+  return;
+}
+// cambio por incidencia android
+
     try {
       await addDoc(collection(db, "workouts"), {
         exercise,
@@ -304,9 +312,12 @@ const ExerciseForm = ({ user, onViewChart }) => {
         weight: parseFloat(weight),
         reps: repsNum,
         timestamp: new Date(),
-        uid: user.uid,
-        userName: user.displayName || "Sin nombre",
-        email: user.email || null,
+// uid: user.uid,
+//        userName: user.displayName || "Sin nombre",
+//        email: user.email || null,
+uid,
+userName: user?.displayName || auth.currentUser?.displayName || "Sin nombre",
+email: user?.email || auth.currentUser?.email || null,
       });
 
       // refrescar sugerencias / resumen
