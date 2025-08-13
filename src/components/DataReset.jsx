@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
-import { collection, deleteDoc, doc, getDocs, query, where } from "firebase/firestore";
+import { collection, deleteDoc, doc, getDocs, query, where, limit } from "firebase/firestore";
 import { db } from "../firebase/config";
+
+const BATCH_SIZE = 200;
 
 const DataReset = ({ user }) => {
   const [exercises, setExercises] = useState([]);
@@ -10,39 +12,68 @@ const DataReset = ({ user }) => {
   // Obtener lista de ejercicios únicos del usuario
   useEffect(() => {
     const fetchExercises = async () => {
+      if (!user) return;
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
-      const names = snapshot.docs.map((doc) => doc.data().exercise);
+      const names = snapshot.docs.map((docSnap) => docSnap.data().exercise);
       const unique = [...new Set(names)].sort();
       setExercises(unique);
     };
     fetchExercises();
   }, [user]);
 
+  // Util: borrar en batches un query dado
+  async function deleteQueryBatches(baseQuery) {
+    let removed = 0;
+    do {
+      const q = query(baseQuery, limit(BATCH_SIZE));
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        removed = 0;
+        break;
+      }
+      const ids = snap.docs.map((d) => d.id);
+      await Promise.all(ids.map((id) => deleteDoc(doc(db, "workouts", id))));
+      removed = snap.size;
+      // opcional: small pause to avoid hot loops (not strictly necessary)
+      await new Promise((r) => setTimeout(r, 150));
+    } while (removed > 0);
+  }
+
   const confirmAndDeleteAll = async () => {
     if (!window.confirm("¿Estás seguro de que quieres borrar TODOS tus registros? Esta acción no se puede deshacer.")) return;
     setLoading(true);
-    const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
-    const snapshot = await getDocs(q);
-    await Promise.all(snapshot.docs.map((doc) => deleteDoc(doc.ref)));
-    setLoading(false);
-    alert("Todos los registros han sido eliminados.");
+    try {
+      const baseQuery = query(collection(db, "workouts"), where("uid", "==", user.uid));
+      await deleteQueryBatches(baseQuery);
+      alert("Todos los registros han sido eliminados.");
+    } catch (err) {
+      console.error("Error borrando todos los registros:", err);
+      alert("Error borrando los registros. Revisa la consola.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const confirmAndDeleteExercise = async () => {
-    if (!selectedExercise) return;
+    if (!selectedExercise) return alert("Selecciona un ejercicio.");
     if (!window.confirm(`¿Borrar todos los registros del ejercicio "${selectedExercise}"? Esta acción no se puede deshacer.`)) return;
     setLoading(true);
-    const q = query(
-      collection(db, "workouts"),
-      where("uid", "==", user.uid),
-      where("exercise", "==", selectedExercise)
-    );
-    const snapshot = await getDocs(q);
-    await Promise.all(snapshot.docs.map((doc) => deleteDoc(doc.ref)));
-    setLoading(false);
-    alert(`Registros del ejercicio "${selectedExercise}" eliminados.`);
-    setSelectedExercise("");
+    try {
+      const baseQuery = query(
+        collection(db, "workouts"),
+        where("uid", "==", user.uid),
+        where("exercise", "==", selectedExercise)
+      );
+      await deleteQueryBatches(baseQuery);
+      alert(`Registros del ejercicio "${selectedExercise}" eliminados.`);
+      setSelectedExercise("");
+    } catch (err) {
+      console.error("Error borrando registros del ejercicio:", err);
+      alert("No se pudieron borrar los registros. Revisa la consola.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -55,7 +86,7 @@ const DataReset = ({ user }) => {
           disabled={loading}
           style={{ backgroundColor: "#a00", color: "white", padding: "10px 20px", border: "none", cursor: "pointer" }}
         >
-          Borrar TODOS mis registros
+          {loading ? "Borrando..." : "Borrar TODOS mis registros"}
         </button>
       </div>
 
@@ -76,7 +107,7 @@ const DataReset = ({ user }) => {
           disabled={!selectedExercise || loading}
           style={{ backgroundColor: "#c00", color: "white", padding: "10px 20px", border: "none", cursor: "pointer" }}
         >
-          Borrar registros del ejercicio seleccionado
+          {loading ? "Borrando..." : "Borrar registros del ejercicio seleccionado"}
         </button>
       </div>
     </div>

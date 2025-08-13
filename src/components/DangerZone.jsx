@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
-import { collection, deleteDoc, getDocs, query, where, doc } from "firebase/firestore";
+import { collection, deleteDoc, getDocs, query, where, doc, limit } from "firebase/firestore";
 import { db } from "../firebase/config";
+
+const BATCH_SIZE = 200;
 
 const DangerZone = ({ user }) => {
   const [exerciseToDelete, setExerciseToDelete] = useState("");
@@ -9,24 +11,39 @@ const DangerZone = ({ user }) => {
 
   useEffect(() => {
     const fetchExercises = async () => {
+      if (!user) return;
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
-      const names = snapshot.docs.map((doc) => doc.data().exercise);
+      const names = snapshot.docs.map((docSnap) => docSnap.data().exercise);
       const unique = [...new Set(names)].sort();
       setExercises(unique);
     };
     fetchExercises();
   }, [user]);
 
+  async function deleteQueryBatches(baseQuery) {
+    let removed;
+    do {
+      const q = query(baseQuery, limit(BATCH_SIZE));
+      const snap = await getDocs(q);
+      if (snap.empty) {
+        removed = 0;
+        break;
+      }
+      const ids = snap.docs.map((d) => d.id);
+      await Promise.all(ids.map((id) => deleteDoc(doc(db, "workouts", id))));
+      removed = snap.size;
+      await new Promise((r) => setTimeout(r, 150));
+    } while (removed > 0);
+  }
+
   const handleFullReset = async () => {
     if (!window.confirm("¿Estás seguro de que quieres borrar todos tus datos? Esta acción no se puede deshacer.")) return;
 
     setIsDeleting(true);
     try {
-      const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
-      const snapshot = await getDocs(q);
-      const deletions = snapshot.docs.map((docSnap) => deleteDoc(doc(db, "workouts", docSnap.id)));
-      await Promise.all(deletions);
+      const baseQuery = query(collection(db, "workouts"), where("uid", "==", user.uid));
+      await deleteQueryBatches(baseQuery);
       alert("Todos los datos han sido eliminados.");
     } catch (err) {
       console.error("Error eliminando los datos:", err);
@@ -42,14 +59,12 @@ const DangerZone = ({ user }) => {
 
     setIsDeleting(true);
     try {
-      const q = query(
+      const baseQuery = query(
         collection(db, "workouts"),
         where("uid", "==", user.uid),
         where("exercise", "==", exerciseToDelete)
       );
-      const snapshot = await getDocs(q);
-      const deletions = snapshot.docs.map((docSnap) => deleteDoc(doc(db, "workouts", docSnap.id)));
-      await Promise.all(deletions);
+      await deleteQueryBatches(baseQuery);
       alert(`Registros de '${exerciseToDelete}' eliminados.`);
       setExerciseToDelete("");
     } catch (err) {
@@ -65,7 +80,7 @@ const DangerZone = ({ user }) => {
       <h2 style={{ color: "#c00", textAlign: "center" }}>Reseteo de datos</h2>
 
       <button onClick={handleFullReset} disabled={isDeleting} style={{ marginBottom: "2rem", padding: "10px" }}>
-        Resetear toda la base de datos
+        {isDeleting ? "Borrando..." : "Resetear toda la base de datos"}
       </button>
 
       <div>
@@ -83,7 +98,7 @@ const DangerZone = ({ user }) => {
           ))}
         </select>
         <button onClick={handleExerciseDelete} disabled={isDeleting} style={{ padding: "10px" }}>
-          Borrar ejercicio
+          {isDeleting ? "Borrando..." : "Borrar ejercicio"}
         </button>
       </div>
     </div>

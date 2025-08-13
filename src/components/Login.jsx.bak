@@ -1,0 +1,193 @@
+// src/components/Login.jsx
+import { useEffect, useState } from "react";
+import {
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  setPersistence,
+  browserLocalPersistence,
+} from "firebase/auth";
+import { auth, googleProvider } from "../firebase/config";
+
+const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+const isAndroid = /Android/i.test(ua);
+const isIOS = /iPad|iPhone|iPod/i.test(ua);
+const isStandalone =
+  typeof navigator !== "undefined" &&
+  ("standalone" in navigator && navigator.standalone === true);
+
+const LOGIN_FLAG = "gymtracker_login_in_progress";
+const LOGIN_FLAG_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+function setLoginFlag() {
+  try {
+    localStorage.setItem(LOGIN_FLAG, JSON.stringify({ ts: Date.now() }));
+  } catch (e) {}
+}
+function clearLoginFlag() {
+  try {
+    localStorage.removeItem(LOGIN_FLAG);
+  } catch (e) {}
+}
+function readLoginFlagAge() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LOGIN_FLAG));
+    if (!v || !v.ts) return Infinity;
+    return Date.now() - Number(v.ts || 0);
+  } catch (e) {
+    return Infinity;
+  }
+}
+
+export default function Login() {
+  const [status, setStatus] = useState("Esperando…");
+  const [lastError, setLastError] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        await setPersistence(auth, browserLocalPersistence);
+
+        // Solo procesar resultado de redirect si iniciamos uno recientemente
+        const age = readLoginFlagAge();
+        if (age < LOGIN_FLAG_TTL_MS) {
+          setStatus("Procesando login...");
+          try {
+            const res = await getRedirectResult(auth);
+            if (res?.user) {
+              setStatus("Sesión iniciada (redirect)");
+            }
+          } catch (err) {
+            console.warn("[Login] getRedirectResult error:", err?.message || err);
+            setLastError(err?.message || String(err));
+          } finally {
+            clearLoginFlag();
+          }
+        } else {
+          clearLoginFlag();
+        }
+      } catch (err) {
+        console.error("[Login] persistence error:", err);
+        setLastError(err?.message || String(err));
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const doRedirectLogin = async () => {
+    try {
+      setStatus("Redirigiendo a Google...");
+      setLastError("");
+      setLoginFlag();
+      await signInWithRedirect(auth, googleProvider);
+    } catch (err) {
+      console.error("[Login] signInWithRedirect error:", err);
+      setStatus("Error al redirigir");
+      setLastError(err?.message || String(err));
+      clearLoginFlag();
+    }
+  };
+
+  const handleLogin = async () => {
+    setStatus("Iniciando sesión…");
+    setLastError("");
+
+    try {
+      await setPersistence(auth, browserLocalPersistence);
+    } catch (e) {
+      console.warn("[Login] setPersistence warning:", e);
+    }
+
+    // Si estamos en iOS instaladas en Home Screen -> NO lanzar redirect automático
+    // (abriremos Safari explícitamente porque iOS PWA no vuelve del OAuth a la PWA)
+    if (isIOS && isStandalone) {
+      setStatus("Abre la app en Safari para iniciar sesión (recomendado en iOS).");
+      return;
+    }
+
+    const tryPopup = !isIOS;
+    if (tryPopup) {
+      try {
+        await signInWithPopup(auth, googleProvider);
+        setStatus("Sesión iniciada con popup");
+        clearLoginFlag();
+        return;
+      } catch (popupErr) {
+        console.warn("[Login] Popup falló; fallback a redirect", popupErr?.message || popupErr);
+        try {
+          await doRedirectLogin();
+          return;
+        } catch (redirectErr) {
+          console.error("[Login] Redirect fallback también falló:", redirectErr);
+          setStatus("Error al iniciar sesión");
+          setLastError(redirectErr?.message || String(redirectErr));
+          clearLoginFlag();
+          return;
+        }
+      }
+    } else {
+      await doRedirectLogin();
+    }
+  };
+
+  // Abrir la URL en Safari (útil cuando la app está en Home Screen)
+  const openInSafari = () => {
+    try {
+      // abrir en nueva pestaña, en iOS esto fuerza Safari
+      window.open(window.location.href, "_blank");
+    } catch (e) {
+      // fallback
+      window.location.href = window.location.href;
+    }
+  };
+
+  return (
+    <div style={{ textAlign: "center", marginTop: "4rem", padding: "1rem", maxWidth: 520, marginInline: "auto" }}>
+      <h2 style={{ fontSize: "1.8rem", marginBottom: "1rem" }}>
+        Inicia sesión en <strong>Gym Tracker</strong>
+      </h2>
+
+      {/* Si estamos en iOS + PWA mostramos ayuda específica */}
+      {isIOS && isStandalone ? (
+        <>
+          <p style={{ color: "#666" }}>
+            Estás usando la app añadida a la pantalla de inicio. En iPhone esta versión no puede
+            completar el proceso de inicio de sesión directamente. Por favor, pulsa el botón
+            para abrir la app en Safari y continua el inicio de sesión allí.
+          </p>
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 12 }}>
+            <button onClick={openInSafari} style={{ padding: "12px 18px", fontSize: 16 }}>
+              Abrir en Safari
+            </button>
+            <button onClick={handleLogin} style={{ padding: "12px 18px", fontSize: 16 }}>
+              Intentar login (no recomendado)
+            </button>
+          </div>
+          <p style={{ marginTop: 10, color: "#999", fontSize: 13 }}>
+            Nota: al abrir en Safari, vuelve a pulsar "Continuar con Google" y completa el flujo; la sesión quedará establecida.
+          </p>
+        </>
+      ) : (
+        <>
+          <button
+            onClick={handleLogin}
+            style={{ padding: "12px 20px", fontSize: 16, borderRadius: 8, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}
+          >
+            Continuar con Google
+          </button>
+          <p style={{ marginTop: 10, color: "#666" }}>{status}</p>
+          {lastError ? (
+            <p style={{ marginTop: 6, color: "#b00020", fontSize: 13 }}>Detalle: {lastError}</p>
+          ) : null}
+          <div style={{ marginTop: 12, color: "#777", fontSize: 13 }}>
+            <p style={{ margin: 0 }}>Si al volver de Google sigues en esta pantalla, prueba:</p>
+            <ul style={{ textAlign: "left", display: "inline-block", marginTop: 6 }}>
+              <li>Permitir ventanas emergentes (popup) en el navegador.</li>
+              <li>Si usas iPhone en pantalla de inicio, usa la opción &quot;Abrir en Safari&quot;.</li>
+            </ul>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

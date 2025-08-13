@@ -7,7 +7,6 @@ import ExerciseChart from "./components/ExerciseChart";
 import DangerZone from "./components/DangerZone";
 import Login from "./components/Login";
 import HistoryViewer from "./components/HistoryViewer";
-import DebugAuth from "./components/DebugAuth";
 
 function App() {
   const [user, setUser] = useState(null);
@@ -143,9 +142,6 @@ function App() {
       </div>
 
       {renderView()}
-
-      {/* Mostrar overlay de debug sólo si la URL contiene ?debug=1 */}
-      {new URLSearchParams(window.location.search).get('debug') === '1' && <DebugAuth />}
     </div>
   );
 }
