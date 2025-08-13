@@ -29,3 +29,6 @@ client_secret_*.json
 src/serviceAccountKey.json
 gymtracker-src-*.zip
 .firebase/
+src/serviceAccountKey.json
+client_secret_*.json
+gymtracker-src-*.zip
