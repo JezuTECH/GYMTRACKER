@@ -1,12 +1,13 @@
+// src/storage.js
 import {
   getStorage,
   ref,
   uploadBytes,
-  uploadBytesResumable, // ⬅️ importación que falta
+  uploadBytesResumable, // ⬅️ importante para ver progreso de subida
   getDownloadURL,
   deleteObject,
 } from "firebase/storage";
-import { app } from "./config";
+import { app } from "./firebase/config";
 
 const storage = getStorage(app);
 
@@ -14,7 +15,7 @@ export {
   storage,
   ref,
   uploadBytes,
-  uploadBytesResumable, // ⬅️ exportación que falta
+  uploadBytesResumable,
   getDownloadURL,
   deleteObject,
 };

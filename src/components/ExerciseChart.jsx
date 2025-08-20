@@ -1,8 +1,7 @@
-// src/components/ExerciseChart.jsx
 import { useEffect, useRef, useState } from "react";
 import { collection, getDocs, query, where, orderBy } from "firebase/firestore";
 import { db } from "../firebase/config";
-
+import { Line } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   TimeScale,
@@ -13,14 +12,13 @@ import {
   Legend,
 } from "chart.js";
 import "chartjs-adapter-date-fns";
-import { Line } from "react-chartjs-2";
+import { Info } from "lucide-react";
+import CalcInfoModal from "./CalcInfoModal";
 
 ChartJS.register(TimeScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
 
-// Helpers de fecha
 const pad2 = (n) => String(n).padStart(2, "0");
-const dateKeyLocal = (d) =>
-  `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const dateKeyLocal = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 const midnightLocal = (d) => {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -35,6 +33,10 @@ const ExerciseChart = ({ user, onBack }) => {
   const [pointsByDay, setPointsByDay] = useState([]);
   const [loading, setLoading] = useState(false);
 
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalSeries, setModalSeries] = useState([]);
+  const [modalDate, setModalDate] = useState(new Date());
+
   const mgRef = useRef(null);
   const exRef = useRef(null);
 
@@ -42,7 +44,6 @@ const ExerciseChart = ({ user, onBack }) => {
   const input = { flex: 1, padding: "16px", fontSize: "1.1rem", borderRadius: "8px", border: "1px solid #ccc" };
   const clearBtn = { flexShrink: 0, background: "#eee", border: "none", fontSize: "1.1rem", cursor: "pointer", padding: "8px 10px", borderRadius: "6px", lineHeight: 1 };
 
-  // Cargar pares (grupo, ejercicio)
   useEffect(() => {
     if (!user) return;
     const run = async () => {
@@ -72,7 +73,6 @@ const ExerciseChart = ({ user, onBack }) => {
     run();
   }, [user]);
 
-  // Filtrar ejercicios según grupo
   useEffect(() => {
     if (!muscleGroup) {
       setExerciseOptions([...new Set(allPairs.map((p) => p.exercise))].sort());
@@ -82,7 +82,6 @@ const ExerciseChart = ({ user, onBack }) => {
     setExerciseOptions([...new Set(opts)].sort());
   }, [muscleGroup, allPairs]);
 
-  // Cargar datos agregados
   useEffect(() => {
     if (!user || !muscleGroup || !exercise) {
       setPointsByDay([]);
@@ -107,43 +106,47 @@ const ExerciseChart = ({ user, onBack }) => {
             : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
           return {
             ok: !!ts && typeof d.weight === "number",
-            ts,
-            weight: typeof d.weight === "number" ? d.weight : null,
-            reps: typeof d.reps === "number" ? d.reps : null,
+            timestamp: ts,
+            weight: d.weight,
+            reps: d.reps,
           };
         }).filter(r => r.ok);
 
         const buckets = new Map();
         rows.forEach((r) => {
-          const key = dateKeyLocal(r.ts);
+          const key = dateKeyLocal(r.timestamp);
           if (!buckets.has(key)) {
-            buckets.set(key, {
-              day: midnightLocal(r.ts),
-              wrSum: 0,
-              repsSumForWeight: 0,
-              rSum: 0,
-              rCount: 0,
-            });
+            buckets.set(key, []);
           }
-          const b = buckets.get(key);
-          const repsForWeight = typeof r.reps === "number" ? r.reps : 10;
-          b.wrSum += r.weight * repsForWeight;
-          b.repsSumForWeight += repsForWeight;
-          const repsForAvg = typeof r.reps === "number" ? r.reps : 10;
-          b.rSum += repsForAvg;
-          b.rCount += 1;
+          buckets.get(key).push(r);
         });
 
-        const points = Array.from(buckets.values())
-          .map((b) => {
-            const avgWeighted = b.repsSumForWeight > 0 ? Number((b.wrSum / b.repsSumForWeight).toFixed(1)) : null;
-            const repsAvg = b.rCount > 0 ? Math.round(b.rSum / b.rCount) : null;
-            const x = b.day.getTime();
-            return { x, y: avgWeighted, repsAvg };
-          })
-          .filter((p) => p.y !== null)
-          .sort((a, b) => a.x - b.x);
+        const points = [];
+        for (let [key, series] of buckets) {
+          const repsValid = series.filter(s => typeof s.reps === "number");
+          const weightValid = series.filter(s => typeof s.weight === "number");
 
+          const repsAvg = repsValid.length > 0
+            ? Math.round(repsValid.reduce((sum, s) => sum + s.reps, 0) / repsValid.length)
+            : 10;
+
+          const pesoPonderado = weightValid.length > 0
+            ? Math.round(
+              weightValid.reduce((sum, s) => sum + s.weight * (s.reps || 10), 0) /
+              weightValid.reduce((sum, s) => sum + (s.reps || 10), 0) * 10
+            ) / 10
+            : null;
+
+          const first = series[0];
+          points.push({
+            x: midnightLocal(first.timestamp).getTime(),
+            y: pesoPonderado,
+            repsAvg,
+            series,
+          });
+        }
+
+        points.sort((a, b) => a.x - b.x);
         setPointsByDay(points);
       } catch (e) {
         console.error("Error leyendo datos de la gráfica:", e);
@@ -155,37 +158,24 @@ const ExerciseChart = ({ user, onBack }) => {
     run();
   }, [user, muscleGroup, exercise]);
 
-  // Limpiar selects
-  const clearMuscleGroup = () => {
-    setMuscleGroup("");
-    setExercise("");
-    setExerciseOptions([...new Set(allPairs.map((p) => p.exercise))].sort());
-    setPointsByDay([]);
-    requestAnimationFrame(() => mgRef.current?.focus());
-  };
-  const clearExercise = () => {
-    setExercise("");
-    setPointsByDay([]);
-    requestAnimationFrame(() => exRef.current?.focus());
-  };
-
-  // Dataset y opciones
   const chartData = {
     datasets: [
       {
         label: "Peso medio ponderado (kg)",
         data: pointsByDay,
         borderWidth: 2,
+        borderColor: "#007bff",
+        backgroundColor: "#007bff44",
         tension: 0.2,
         pointRadius: 4,
         spanGaps: true,
+        parsing: false,
       },
     ],
   };
 
   const chartOptions = {
     responsive: true,
-    parsing: false,
     animation: false,
     scales: {
       x: {
@@ -196,130 +186,154 @@ const ExerciseChart = ({ user, onBack }) => {
           displayFormats: { day: "dd/MM/yyyy" },
         },
         title: { display: true, text: "Fecha" },
-        min: pointsByDay.length ? pointsByDay[0].x : undefined,
-        max: pointsByDay.length ? pointsByDay[pointsByDay.length - 1].x : undefined,
       },
       y: {
-        title: { display: true, text: "Peso medio ponderado (kg)" },
+        title: { display: true, text: "Peso (kg)" },
         beginAtZero: false,
       },
     },
     plugins: {
       legend: { display: true },
       tooltip: {
-        mode: "index",
-        intersect: false,
         callbacks: {
-          title: (items) => {
-            const x = items?.[0]?.parsed?.x;
-            return x ? new Date(x).toLocaleDateString() : "";
-          },
-          label: (ctx) => {
-            const val = ctx.parsed?.y;
-            return `Peso medio: ${val} kg`;
-          },
+          label: (ctx) => `Peso: ${ctx.parsed.y} kg`,
           afterBody: (items) => {
-            const dp = items?.[0]?.raw;
-            if (dp?.repsAvg != null) return [`Reps medias: ${dp.repsAvg}`];
-            return [];
+            const d = items[0]?.raw;
+            return d?.repsAvg ? [`Reps medias: ${d.repsAvg}`] : [];
           },
         },
       },
     },
   };
 
-  const repsLabelPlugin = {
-    id: "repsLabelPlugin",
-    afterDatasetsDraw(chart) {
-      const { ctx } = chart;
-      const ds = chart.data.datasets?.[0];
-      const meta = chart.getDatasetMeta(0);
-      if (!ds || !meta) return;
-      ctx.save();
-      ctx.font = "12px sans-serif";
-      ctx.fillStyle = "#444";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      meta.data.forEach((elem, i) => {
-        const raw = ds.data?.[i];
-        const reps = raw?.repsAvg;
-        if (reps == null) return;
-        const { x, y } = elem.tooltipPosition();
-        ctx.fillText(`${reps}`, x, y - 6);
-      });
-      ctx.restore();
-    },
-  };
-
   return (
     <div style={{ maxWidth: 700, margin: "0 auto", padding: "1rem" }}>
       <button onClick={onBack} style={{ marginBottom: "1rem" }}>← Volver</button>
-      <h2 style={{ marginBottom: "1rem" }}>Progreso</h2>
+      <h2>Progreso</h2>
 
-      {/* Grupo muscular */}
-      <label htmlFor="mg">Grupo muscular</label>
+      {/* Desplegables */}
+      <label>Grupo muscular</label>
       <div style={row}>
         <input
-          id="mg"
           list="mg-list"
           value={muscleGroup}
           onChange={(e) => setMuscleGroup(e.target.value)}
-          placeholder="Pectoral, Pierna, Espalda…"
+          placeholder="Pectoral, Pierna..."
           ref={mgRef}
           style={input}
         />
-        {muscleGroup && (
-          <button type="button" onClick={clearMuscleGroup} style={clearBtn}>✕</button>
-        )}
+        {muscleGroup && <button onClick={() => { setMuscleGroup(""); setExercise(""); }} style={clearBtn}>✕</button>}
       </div>
       <datalist id="mg-list">
-        {[...new Set(allPairs.map((p) => p.muscleGroup))].sort().map((g, i) => (
+        {[...new Set(allPairs.map(p => p.muscleGroup))].sort().map((g, i) => (
           <option key={i} value={g} />
         ))}
       </datalist>
 
-      {/* Ejercicio */}
-      <label htmlFor="ex">Ejercicio</label>
+      <label>Ejercicio</label>
       <div style={row}>
         <input
-          id="ex"
           list="ex-list"
           value={exercise}
           onChange={(e) => setExercise(e.target.value)}
-          placeholder="Escribe o selecciona"
+          placeholder="Press banca, Sentadilla..."
           ref={exRef}
           style={input}
         />
-        {exercise && (
-          <button type="button" onClick={clearExercise} style={clearBtn}>✕</button>
-        )}
+        {exercise && <button onClick={() => setExercise("")} style={clearBtn}>✕</button>}
       </div>
       <datalist id="ex-list">
-        {exerciseOptions.map((ex, i) => (
-          <option key={i} value={ex} />
-        ))}
+        {exerciseOptions.map((e, i) => <option key={i} value={e} />)}
       </datalist>
 
-      {/* Estado / Gráfica */}
+      {/* Gráfica */}
       {loading && <p>Cargando datos…</p>}
-      {!loading && muscleGroup && exercise && pointsByDay.length === 0 && <p>No hay registros para este ejercicio.</p>}
       {!loading && pointsByDay.length > 0 && (
         <>
           <div style={{ marginTop: "1rem" }}>
-            <Line data={chartData} options={chartOptions} plugins={[repsLabelPlugin]} />
+            <Line data={chartData} options={chartOptions} />
           </div>
-          <div style={{ marginTop: "1rem", fontSize: "0.9rem", color: "#555" }}>
-            <strong>Puntos calculados:</strong>
-            <ul style={{ marginTop: "0.25rem" }}>
+          <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
+            <strong>Puntos calculados</strong>
+            <ul>
               {pointsByDay.map((p, i) => (
                 <li key={i}>
-                  {new Date(p.x).toLocaleDateString()} — {p.y} kg — {p.repsAvg ?? "-"} reps
+                  {new Date(p.x).toLocaleDateString()} — {p.y} kg — {p.repsAvg ?? "-"} reps{" "}
+                  <button
+                    onClick={() => {
+                      setModalSeries(p.series);
+                      setModalDate(new Date(p.x));
+                      setModalOpen(true);
+                    }}
+                    style={{
+                      border: "none",
+                      background: "none",
+                      cursor: "pointer",
+                      verticalAlign: "middle",
+                    }}
+                  >
+                    <Info size={16} color="#007bff" />
+                  </button>
                 </li>
               ))}
             </ul>
           </div>
         </>
       )}
+
+      {/* Tabla */}
+      {allPairs.length > 0 && (
+        <>
+          <hr style={{ margin: "2rem 0" }} />
+          <h3>Acceso rápido a ejercicios</h3>
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", padding: "6px", borderBottom: "1px solid #ccc" }}>Grupo muscular</th>
+                <th style={{ textAlign: "left", padding: "6px", borderBottom: "1px solid #ccc" }}>Ejercicio</th>
+                <th style={{ padding: "6px", borderBottom: "1px solid #ccc" }}>Seleccionar</th>
+              </tr>
+            </thead>
+            <tbody>
+              {allPairs.map((p, i) => (
+                <tr key={i}>
+                  <td style={{ padding: "6px", borderBottom: "1px solid #eee" }}>{p.muscleGroup}</td>
+                  <td style={{ padding: "6px", borderBottom: "1px solid #eee" }}>{p.exercise}</td>
+                  <td style={{ textAlign: "center", padding: "6px", borderBottom: "1px solid #eee" }}>
+                    <button
+                      onClick={() => {
+                        setMuscleGroup(p.muscleGroup);
+                        setExercise(p.exercise);
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                      style={{
+                        padding: "6px 10px",
+                        fontSize: "14px",
+                        background: "#f0f0f0",
+                        border: "1px solid #ccc",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Ver gráfica
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      {/* Modal */}
+      <CalcInfoModal
+        isOpen={modalOpen}
+        onClose={() => setModalOpen(false)}
+        muscleGroup={muscleGroup}
+        exercise={exercise}
+        date={modalDate}
+        series={modalSeries}
+      />
     </div>
   );
 };

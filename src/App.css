@@ -1,5 +1,6 @@
 /* App.css */
 
+/* ===== 🎨 MODO CLARO ===== */
 body {
   margin: 0;
   padding: 0;
@@ -103,6 +104,7 @@ select:focus {
   width: 100%;
 }
 
+/* Responsive para móviles */
 @media (max-width: 500px) {
   h1 {
     font-size: 1.6rem;
@@ -117,4 +119,52 @@ select:focus {
     font-size: 13px;
     padding: 6px 10px;
   }
+}
+
+/* === ✅ 2025-08-20: MODO OSCURO === */
+body.dark-mode {
+  background-color: #121212;
+  color: #f0f0f0;
+}
+
+body.dark-mode .App {
+  background-color: #1e1e1e;
+  color: #f0f0f0;
+  box-shadow: none;
+}
+
+body.dark-mode h1,
+body.dark-mode p,
+body.dark-mode label {
+  color: #f0f0f0;
+}
+
+body.dark-mode input,
+body.dark-mode select {
+  background-color: #2c2c2c;
+  color: #f0f0f0;
+  border: 1px solid #444;
+}
+
+body.dark-mode button {
+  background-color: #333;
+  color: #f0f0f0;
+  border: 1px solid #444;
+}
+
+body.dark-mode .nav-buttons button {
+  background-color: #333;
+}
+
+body.dark-mode .danger-zone {
+  border-top: 2px solid #ff4d4d;
+}
+
+body.dark-mode .danger-zone h3 {
+  color: #ff4d4d;
+}
+
+body.dark-mode .danger-zone button {
+  background-color: #ff4d4d;
+  color: white;
 }

@@ -13,6 +13,24 @@ import { db, auth } from "../firebase/config";
 
 const ExerciseForm = ({ user, onViewChart }) => {
   const [exercise, setExercise] = useState("");
+
+  // ✅ NUEVO BLOQUE: capturar parámetros de la URL al cargar
+useEffect(() => {
+  const params = new URLSearchParams(window.location.search);
+  const ex = params.get("exercise");
+  const mg = params.get("muscleGroup");
+  if (ex) setExercise(ex);
+  if (mg) setMuscleGroup(mg);
+}, []);
+
+// ✅ Mover aquí el de limpieza
+useEffect(() => {
+  const params = new URLSearchParams(window.location.search);
+  if (params.has("exercise") || params.has("muscleGroup")) {
+    window.history.replaceState({}, "", window.location.pathname);
+  }
+}, []);
+
   const [muscleGroup, setMuscleGroup] = useState("");
   const [allExercises, setAllExercises] = useState([]);
 
@@ -704,6 +722,11 @@ email: user?.email || auth.currentUser?.email || null,
       )}
     </>
   );
+
+// ✅ NUEVO BLOQUE: limpiar parámetros de la URL después de usarlos
+
 };
+
+
 
 export default ExerciseForm;
