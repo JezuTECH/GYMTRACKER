@@ -13,7 +13,7 @@ import {
 } from "chart.js";
 import "chartjs-adapter-date-fns";
 import { Info } from "lucide-react";
-import CalcInfoModal from "./CalcInfoModal";
+// import CalcInfoModal from "./CalcInfoModal";
 
 ChartJS.register(TimeScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
 
@@ -36,6 +36,8 @@ const ExerciseChart = ({ user, onBack }) => {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalSeries, setModalSeries] = useState([]);
   const [modalDate, setModalDate] = useState(new Date());
+
+  const [openDetailIndex, setOpenDetailIndex] = useState(null);
 
   // Dropdown states & refs (mismo patrón que ExerciseForm)
   const [openGroupSug, setOpenGroupSug] = useState(false);
@@ -307,26 +309,65 @@ const ExerciseChart = ({ user, onBack }) => {
           <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
             <strong>Puntos calculados</strong>
             <ul>
-              {pointsByDay.map((p, i) => (
-                <li key={i}>
-                  {new Date(p.x).toLocaleDateString()} — Power Score: {p.powerScore} — {p.repsAvg ?? "-"} reps{" "}
-                  <button
-                    onClick={() => {
-                      setModalSeries(p.series);
-                      setModalDate(new Date(p.x));
-                      setModalOpen(true);
-                    }}
-                    style={{
-                      border: "none",
-                      background: "none",
-                      cursor: "pointer",
-                      verticalAlign: "middle",
-                    }}
-                  >
-                    <Info size={16} color="#007bff" />
-                  </button>
-                </li>
-              ))}
+              {pointsByDay.map((p, i) => {
+                const isOpen = openDetailIndex === i;
+                return (
+                  <li key={i} style={{ marginBottom: isOpen ? "0.5rem" : 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ flex: 1 }}>
+                        {new Date(p.x).toLocaleDateString()} — Power Score: {p.powerScore} — {p.repsAvg ?? "-"} reps
+                      </span>
+                      <button
+                        onClick={() => setOpenDetailIndex(isOpen ? null : i)}
+                        style={{
+                          border: "none",
+                          background: "none",
+                          cursor: "pointer",
+                          verticalAlign: "middle",
+                        }}
+                        aria-expanded={isOpen}
+                        aria-label={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                        title={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                      >
+                        <Info size={16} color="#007bff" />
+                      </button>
+                    </div>
+
+                    {isOpen && (
+                      <div style={{
+                        border: "1px solid #e5e5e5",
+                        borderRadius: 8,
+                        padding: "6px 8px",
+                        marginTop: 6,
+                        background: "#fafafa",
+                      }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                          <thead>
+                            <tr>
+                              <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
+                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
+                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[...p.series]
+                              .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                              .map((s, idx) => (
+                                <tr key={idx}>
+                                  <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
+                                    {s.timestamp ? s.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}
+                                  </td>
+                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{s.weight ?? "-"}</td>
+                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{s.reps ?? "-"}</td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </>
@@ -383,24 +424,7 @@ const ExerciseChart = ({ user, onBack }) => {
         </div>
       )}
 
-      {/* Modal */}
-      <CalcInfoModal
-        isOpen={modalOpen}
-        onClose={() => setModalOpen(false)}
-        muscleGroup={muscleGroup}
-        exercise={exercise}
-        date={modalDate}
-        series={modalSeries}
-        powerScore={modalSeries.length > 0 ? (() => {
-          const validSeries = modalSeries.map(s => ({
-            weight: typeof s.weight === "number" ? s.weight : 0,
-            reps: typeof s.reps === "number" ? s.reps : 10
-          }));
-          const totalReps = validSeries.reduce((sum, s) => sum + s.reps, 0);
-          const avgWeight = validSeries.length > 0 ? validSeries.reduce((sum, s) => sum + s.weight, 0) / validSeries.length : 0;
-          return Math.round(avgWeight * totalReps);
-        })() : null}
-      />
+      {/* Modal eliminado: ahora el detalle se despliega inline bajo cada día */}
     </div>
   );
 };

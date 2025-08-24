@@ -1,7 +1,7 @@
 // src/components/ExerciseForm.jsx
 import { useState, useEffect, useRef, useMemo } from "react";
 import { calculateWeightedAverage, calculateAverageReps } from "../utils/calculateAverages";
-import CalcInfoModal from "./CalcInfoModal";
+// import CalcInfoModal from "./CalcInfoModal";
 import {
   collection,
   addDoc,
@@ -71,6 +71,8 @@ useEffect(() => {
   const [lastTimestamp, setLastTimestamp] = useState(null);
   const [saveStatus, setSaveStatus] = useState(null);
   const [summaryData, setSummaryData] = useState([]);
+  const [openInline, setOpenInline] = useState(null); // 'last' | 'prev' | null
+  const [openSummaryKey, setOpenSummaryKey] = useState(null); // acordeón en Resumen
   const [infoItem, setInfoItem] = useState(null);
   const [headerInfo, setHeaderInfo] = useState(null);
   const [prevHeaderInfo, setPrevHeaderInfo] = useState(null);
@@ -697,6 +699,7 @@ useEffect(() => {
 
         {/* Último registro */}
         {headerInfo && (
+          <>
           <p style={{ fontSize: "0.9rem", color: "gray", display: "flex", alignItems: "center", gap: 8 }}>
             <span>
               <strong>
@@ -726,15 +729,10 @@ useEffect(() => {
             </span>
             <button
               type="button"
-              onClick={e => {
-                setInfoItem({
-                  ...headerInfo,
-                  _clickX: e.clientX,
-                  _clickY: e.clientY,
-                });
-              }}
+              onClick={() => setOpenInline(openInline === 'last' ? null : 'last')}
               title="Ver detalle del cálculo"
               aria-label="Ver detalle del cálculo"
+              aria-expanded={openInline === 'last'}
               style={{
                 padding: "2px 5px",
                 borderRadius: 4,
@@ -753,10 +751,44 @@ useEffect(() => {
               ℹ️
             </button>
           </p>
+          {openInline === 'last' && headerInfo && Array.isArray(headerInfo._debugRows) && (
+            <div style={{
+              border: "1px solid #e5e5e5",
+              borderRadius: 8,
+              padding: "6px 8px",
+              margin: "6px 0 10px",
+              background: "#fafafa",
+            }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
+                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
+                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...headerInfo._debugRows]
+                    .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                    .map((r, idx) => (
+                      <tr key={idx}>
+                        <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
+                          {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                        </td>
+                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
+                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          </>
         )}
 
         {/* Penúltimo registro */}
         {prevHeaderInfo && (
+          <>
           <p style={{ fontSize: "0.9rem", color: "gray", display: "flex", alignItems: "center", gap: 8 }}>
             <span>
               <strong>
@@ -773,15 +805,10 @@ useEffect(() => {
             </span>
             <button
               type="button"
-              onClick={e => {
-                setInfoItem({
-                  ...prevHeaderInfo,
-                  _clickX: e.clientX,
-                  _clickY: e.clientY,
-                });
-              }}
+              onClick={() => setOpenInline(openInline === 'prev' ? null : 'prev')}
               title="Ver detalle del cálculo (penúltima vez)"
               aria-label="Ver detalle del cálculo (penúltima vez)"
+              aria-expanded={openInline === 'prev'}
               style={{
                 padding: "2px 5px",
                 borderRadius: 4,
@@ -800,6 +827,39 @@ useEffect(() => {
               ℹ️
             </button>
           </p>
+          {openInline === 'prev' && prevHeaderInfo && Array.isArray(prevHeaderInfo._debugRows) && (
+            <div style={{
+              border: "1px solid #e5e5e5",
+              borderRadius: 8,
+              padding: "6px 8px",
+              margin: "6px 0 10px",
+              background: "#fafafa",
+            }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+                <thead>
+                  <tr>
+                    <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
+                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
+                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...prevHeaderInfo._debugRows]
+                    .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                    .map((r, idx) => (
+                      <tr key={idx}>
+                        <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
+                          {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                        </td>
+                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
+                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          </>
         )}
 
         <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-end", marginBottom: "1rem" }}>
@@ -874,7 +934,7 @@ useEffect(() => {
                 {exercises.map((item, index) => (
                   <li
                     key={index}
-                    style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem", cursor: "pointer" }}
+                    style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "0.5rem", cursor: "pointer" }}
                     onClick={() => {
                       setExerciseName(item.exercise);
                       setMuscleGroup(item.muscleGroup);
@@ -889,39 +949,72 @@ useEffect(() => {
                       setOpenGroupSug(false);
                     }}
                   >
-                    <div>
-                      <strong>{item.exercise}</strong> — {item.weight} kg × {item.reps} reps
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <strong>{item.exercise}</strong> — {item.weight} kg × {item.reps} reps
+                      </div>
+                      <button
+                        type="button"
+                        onClick={e => {
+                          e.stopPropagation();
+                          const key = `${item.muscleGroup}||${item.exercise}`;
+                          setOpenSummaryKey(openSummaryKey === key ? null : key);
+                        }}
+                        title="Ver detalle del día"
+                        aria-label="Ver detalle del día"
+                        aria-expanded={openSummaryKey === `${item.muscleGroup}||${item.exercise}`}
+                        style={{
+                          padding: "2px 5px",
+                          borderRadius: 4,
+                          border: "1px solid #ddd",
+                          background: "var(--info-button-bg, #f6f6f6)",
+                          cursor: "pointer",
+                          fontSize: "0.92rem",
+                          lineHeight: 1,
+                          minWidth: 0,
+                          height: "1.5em",
+                          display: "inline-flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          marginLeft: 8
+                        }}
+                      >
+                        ℹ️
+                      </button>
                     </div>
-                    <button
-                      type="button"
-                      onClick={e => {
-                        e.stopPropagation();
-                        setInfoItem({
-                          ...item,
-                          _clickX: e.clientX,
-                          _clickY: e.clientY,
-                        });
-                      }}
-                      title="Ver detalle del cálculo"
-                      aria-label="Ver detalle del cálculo"
-                      style={{
-                        padding: "2px 5px",
-                        borderRadius: 4,
-                        border: "1px solid #ddd",
-                        background: "var(--info-button-bg, #f6f6f6)",
-                        cursor: "pointer",
-                        fontSize: "0.92rem",
-                        lineHeight: 1,
-                        minWidth: 0,
-                        height: "1.5em",
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        marginLeft: 8
-                      }}
-                    >
-                      ℹ️
-                    </button>
+
+                    {openSummaryKey === `${item.muscleGroup}||${item.exercise}` && Array.isArray(item._debugRows) && (
+                      <div style={{
+                        border: "1px solid #e5e5e5",
+                        borderRadius: 8,
+                        padding: "6px 8px",
+                        margin: "6px 0 2px",
+                        background: "#fafafa",
+                      }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+                          <thead>
+                            <tr>
+                              <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
+                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
+                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {[...item._debugRows]
+                              .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                              .map((r, idx2) => (
+                                <tr key={idx2}>
+                                  <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
+                                    {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                                  </td>
+                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
+                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
+                                </tr>
+                              ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -930,126 +1023,7 @@ useEffect(() => {
         </div>
       </form>
 
-      {/* Modal info cálculo fijo arriba */}
-      {infoItem && (
-        <>
-          {/* CSS variables para dark mode */}
-          <style>
-            {`
-            :root {
-              --modal-bg: #fff;
-              --modal-text: #222;
-            }
-            @media (prefers-color-scheme: dark) {
-              :root {
-                --modal-bg: #1e1e1e;
-                --modal-text: #ddd;
-              }
-            }
-            `}
-          </style>
-          <div
-            style={{
-              position: "fixed",
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: "rgba(0,0,0,0.5)",
-              zIndex: 1100,
-              display: "block",
-              overflowY: "auto",
-              padding: "2vh 1rem",
-            }}
-            onClick={() => setInfoItem(null)}
-          >
-            <div
-              onClick={e => e.stopPropagation()}
-              style={{
-                background: "var(--modal-bg, #fff)",
-                color: "var(--modal-text, #222)",
-                maxWidth: 520,
-                width: "90%",
-                borderRadius: 10,
-                padding: "16px",
-                boxShadow: "0 10px 30px rgba(0,0,0,0.4)",
-                zIndex: 1101,
-                maxHeight: "90vh",
-                overflowY: "auto",
-                // Center modal vertically around click Y coordinate
-                position: "absolute",
-                top: `${(infoItem._clickY ?? 300) - 200}px`,
-                left: "50%",
-                transform: "translateX(-50%)",
-                // Remove margin: "2rem auto"
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                <h3 style={{ margin: 0 }}>Cómo calculamos el registro</h3>
-                <button onClick={() => setInfoItem(null)} style={{ background: "transparent", border: "none", fontSize: 20, cursor: "pointer", color: "inherit" }} aria-label="Cerrar">✕</button>
-              </div>
-              <p style={{ margin: "4px 0 10px", color: "var(--modal-text, #222)" }}>
-                <strong>Grupo:</strong> {infoItem.muscleGroup || "-"} &nbsp;·&nbsp; <strong>Ejercicio:</strong> {infoItem.exercise || "-"}
-              </p>
-              <hr />
-              <div>
-                <p style={{ margin: "6px 0" }}>
-                  <strong>Powerscore:</strong>{" "}
-                  {(() => {
-                    const rows = infoItem._debugRows || [];
-                    const totalWeightReps = rows.reduce((sum, r) => sum + ((r.weight ?? 0) * (r.reps ?? 0)), 0);
-                    const totalReps = rows.reduce((sum, r) => sum + (r.reps ?? 0), 0);
-                    const avgWeight = totalReps > 0 ? totalWeightReps / totalReps : 0;
-                    const powerScore = Math.round(avgWeight * totalReps);
-                    return `${powerScore} pts`;
-                  })()}
-                  {infoItem._lastDay ? ` — ${formatDateLabel(infoItem._lastDay)}` : ""}
-                </p>
-                <p style={{ margin: "6px 0 8px" }}><strong>Series consideradas ese día:</strong></p>
-                {Array.isArray(infoItem._debugRows) && infoItem._debugRows.length > 0 ? (
-                  <ul style={{ maxHeight: 220, overflow: "auto", paddingLeft: 18, margin: 0 }}>
-                    {infoItem._debugRows.map((r, idx) => (
-                      <li key={idx} style={{ margin: "2px 0" }}>
-                        {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : "--:--"}
-                        {": "}
-                        <strong>{r.weight ?? '-'}</strong> kg × <strong>{r.reps ?? '-'}</strong> reps
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <p>No se han encontrado series para ese día.</p>
-                )}
-                <hr style={{ margin: "12px 0" }} />
-                <div>
-                  <h4 style={{ margin: "6px 0" }}>Racional del cálculo</h4>
-                  <p style={{ margin: 0, lineHeight: 1.5 }}>
-                    Para cada combinación <strong>grupo</strong> + <strong>ejercicio</strong> buscamos el <strong>último día</strong> en el que lo realizaste.
-                    De ese día tomamos todas las series y calculamos:
-                  </p>
-                  <ul style={{ marginTop: 6 }}>
-                    <li><strong>Peso promedio</strong> = suma de todos los pesos ÷ número de series del día.</li>
-                    <li><strong>Reps totales</strong> = suma de todas las reps del día.</li>
-                    <li><strong>Power Score</strong> = peso promedio × reps totales.</li>
-                  </ul>
-                </div>
-              </div>
-              <div style={{ textAlign: "right", marginTop: 12 }}>
-                <button
-                  onClick={() => setInfoItem(null)}
-                  style={{
-                    padding: "8px 12px",
-                    borderRadius: 6,
-                    border: "1px solid #ddd",
-                    background: "#ddd", // antes #f6f6f6
-                    cursor: "pointer",
-                    color: "black" // añadido
-                  }}
-                >Cerrar</button>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
+
     </>
   );
 
