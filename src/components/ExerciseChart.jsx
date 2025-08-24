@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { collection, getDocs, query, where, orderBy } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { Line } from "react-chartjs-2";
@@ -37,12 +37,90 @@ const ExerciseChart = ({ user, onBack }) => {
   const [modalSeries, setModalSeries] = useState([]);
   const [modalDate, setModalDate] = useState(new Date());
 
+  // Dropdown states & refs (mismo patrón que ExerciseForm)
+  const [openGroupSug, setOpenGroupSug] = useState(false);
+  const [openExSug, setOpenExSug] = useState(false);
+  const groupSugRef = useRef(null);
+  const exSugRef = useRef(null);
+
+  // Sugerencias únicas
+  const groupSuggestions = useMemo(
+    () => [...new Set(allPairs.map((p) => p.muscleGroup))].sort(),
+    [allPairs]
+  );
+
+  const filteredGroupSuggestions = useMemo(() => {
+    const q = (muscleGroup || "").toLowerCase().trim();
+    if (!q) return groupSuggestions.slice(0, 20);
+    return groupSuggestions
+      .filter((g) => (g || "").toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [muscleGroup, groupSuggestions]);
+
+  const filteredExerciseSuggestions = useMemo(() => {
+    const q = (exercise || "").toLowerCase().trim();
+    if (!q) return exerciseOptions.slice(0, 20);
+    return exerciseOptions
+      .filter((e) => (e || "").toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [exercise, exerciseOptions]);
+
   const mgRef = useRef(null);
   const exRef = useRef(null);
 
-  const row = { display: "flex", alignItems: "center", gap: "6px", marginBottom: "0.5rem" };
-  const input = { flex: 1, padding: "16px", fontSize: "1.1rem", borderRadius: "8px", border: "1px solid #ccc" };
-  const clearBtn = { flexShrink: 0, background: "#eee", border: "none", fontSize: "1.1rem", cursor: "pointer", padding: "8px 10px", borderRadius: "6px", lineHeight: 1 };
+  const row = { display: "flex", alignItems: "center", gap: "12px" };
+  const comboRow = {
+    display: "grid",
+    gridTemplateColumns: "auto 1fr auto auto 1fr auto", // Label, Input, X, Label, Input, X
+    alignItems: "center",
+    columnGap: "12px",
+  };
+  const input = {
+    flex: 1,
+    boxSizing: "border-box",
+    height: 36,
+    lineHeight: "36px",
+    padding: "0 10px",
+    fontSize: "0.9rem",
+    borderRadius: "10px",
+    border: "1px solid #ccc",
+    WebkitAppearance: "none",
+    appearance: "none",
+    transform: "translateY(8px)", // baja 8px el cuadro para alinear el eje
+  };
+  const clearBtn = {
+    flexShrink: 0,
+    boxSizing: "border-box",
+    background: "#eee",
+    border: "1px solid #ccc",
+    fontSize: "0.9rem",
+    cursor: "pointer",
+    padding: "0 10px",
+    borderRadius: "10px",
+    height: 36,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1,
+  };
+  const panel = {
+    background: "rgba(122, 134, 204, 0.5)",
+    border: "1px solid #e6e56f",
+    borderRadius: "10px",
+    padding: "10px",
+    marginTop: "6px",
+    marginBottom: "8px",
+  };
+  const leftLabel = {
+    fontWeight: "bold",
+    fontSize: "0.9rem",
+    minWidth: "72px",
+    textAlign: "left",
+    display: "flex",
+    alignItems: "center",
+    boxSizing: "border-box",
+    height: 36,
+  };
 
   useEffect(() => {
     if (!user) return;
@@ -123,26 +201,23 @@ const ExerciseChart = ({ user, onBack }) => {
 
         const points = [];
         for (let [key, series] of buckets) {
-          const repsValid = series.filter(s => typeof s.reps === "number");
-          const weightValid = series.filter(s => typeof s.weight === "number");
+          const validSeries = series.map(s => ({
+            weight: typeof s.weight === "number" ? s.weight : 0,
+            reps: typeof s.reps === "number" ? s.reps : 10
+          }));
 
-          const repsAvg = repsValid.length > 0
-            ? Math.round(repsValid.reduce((sum, s) => sum + s.reps, 0) / repsValid.length)
-            : 10;
-
-          const pesoPonderado = weightValid.length > 0
-            ? Math.round(
-              weightValid.reduce((sum, s) => sum + s.weight * (s.reps || 10), 0) /
-              weightValid.reduce((sum, s) => sum + (s.reps || 10), 0) * 10
-            ) / 10
-            : null;
+          const totalReps = validSeries.reduce((sum, s) => sum + s.reps, 0);
+          const totalWeight = validSeries.reduce((sum, s) => sum + s.weight, 0);
+          const weightAvg = validSeries.length > 0 ? totalWeight / validSeries.length : 0;
+          const powerScore = Math.round(weightAvg * totalReps);
 
           const first = series[0];
           points.push({
             x: midnightLocal(first.timestamp).getTime(),
-            y: pesoPonderado,
-            repsAvg,
+            y: powerScore,
+            repsAvg: Math.round(totalReps / series.length),
             series,
+            powerScore,
           });
         }
 
@@ -158,10 +233,19 @@ const ExerciseChart = ({ user, onBack }) => {
     run();
   }, [user, muscleGroup, exercise]);
 
+  useEffect(() => {
+    function handle(e) {
+      if (groupSugRef.current && !groupSugRef.current.contains(e.target)) setOpenGroupSug(false);
+      if (exSugRef.current && !exSugRef.current.contains(e.target)) setOpenExSug(false);
+    }
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, []);
+
   const chartData = {
     datasets: [
       {
-        label: "Peso medio ponderado (kg)",
+        label: "Power Score",
         data: pointsByDay,
         borderWidth: 2,
         borderColor: "#007bff",
@@ -188,7 +272,7 @@ const ExerciseChart = ({ user, onBack }) => {
         title: { display: true, text: "Fecha" },
       },
       y: {
-        title: { display: true, text: "Peso (kg)" },
+        title: { display: true, text: "Power Score" },
         beginAtZero: false,
       },
     },
@@ -196,7 +280,7 @@ const ExerciseChart = ({ user, onBack }) => {
       legend: { display: true },
       tooltip: {
         callbacks: {
-          label: (ctx) => `Peso: ${ctx.parsed.y} kg`,
+          label: (ctx) => `Power Score: ${ctx.parsed.y}`,
           afterBody: (items) => {
             const d = items[0]?.raw;
             return d?.repsAvg ? [`Reps medias: ${d.repsAvg}`] : [];
@@ -211,40 +295,115 @@ const ExerciseChart = ({ user, onBack }) => {
       <button onClick={onBack} style={{ marginBottom: "1rem" }}>← Volver</button>
       <h2>Progreso</h2>
 
-      {/* Desplegables */}
-      <label>Grupo muscular</label>
-      <div style={row}>
-        <input
-          list="mg-list"
-          value={muscleGroup}
-          onChange={(e) => setMuscleGroup(e.target.value)}
-          placeholder="Pectoral, Pierna..."
-          ref={mgRef}
-          style={input}
-        />
-        {muscleGroup && <button onClick={() => { setMuscleGroup(""); setExercise(""); }} style={clearBtn}>✕</button>}
+      {/* Desplegables (misma UI que ExerciseForm) */}
+      <div style={panel}>
+        {/* Fila: Grupo */}
+        {/* Fila combinada: Grupo y Ejercicio en una sola línea */}
+        <div style={comboRow}>
+          <label style={leftLabel}>Grupo:</label>
+          <div ref={groupSugRef} style={{ position: "relative", flex: 1 }}>
+            <input
+              value={muscleGroup}
+              onChange={(e) => { setMuscleGroup(e.target.value); setOpenGroupSug(true); }}
+              onFocus={() => setOpenGroupSug(true)}
+              placeholder="Escribe grupo…"
+              ref={mgRef}
+              style={input}
+            />
+            {openGroupSug && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  background: "#fff",
+                  border: "1px solid #ddd",
+                  zIndex: 50,
+                  maxHeight: 260,
+                  overflowY: "auto",
+                  borderBottomLeftRadius: "12px",
+                  borderBottomRightRadius: "12px",
+                  marginTop: 0,
+                  fontSize: "0.9rem",
+                }}
+              >
+                {filteredGroupSuggestions.length === 0 && (muscleGroup || "").trim() && (
+                  <div style={{ padding: "8px 10px", color: "#777" }}>Sin resultados</div>
+                )}
+                {filteredGroupSuggestions.map((g, i) => (
+                  <div
+                    key={`${g}-${i}`}
+                    onClick={() => { setMuscleGroup(g); setOpenGroupSug(false); }}
+                    style={{ padding: "8px 10px", cursor: "pointer" }}
+                  >
+                    {g}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => { setMuscleGroup(""); setExercise(""); setOpenGroupSug(false); }}
+            title="Borrar grupo"
+            aria-label="Borrar grupo"
+            style={{ ...clearBtn }}
+          >
+            ✕
+          </button>
+          <label style={leftLabel}>Ejercicio:</label>
+          <div ref={exSugRef} style={{ position: "relative", flex: 1 }}>
+            <input
+              value={exercise}
+              onChange={(e) => { setExercise(e.target.value); setOpenExSug(true); }}
+              onFocus={() => setOpenExSug(true)}
+              placeholder="Escribe un ejercicio…"
+              ref={exRef}
+              style={input}
+            />
+            {openExSug && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  background: "#fff",
+                  border: "1px solid #ddd",
+                  zIndex: 50,
+                  maxHeight: 260,
+                  overflowY: "auto",
+                  borderBottomLeftRadius: "12px",
+                  borderBottomRightRadius: "12px",
+                  marginTop: 0,
+                  fontSize: "0.9rem",
+                }}
+              >
+                {filteredExerciseSuggestions.length === 0 && (exercise || "").trim() && (
+                  <div style={{ padding: "8px 10px", color: "#777" }}>Sin resultados</div>
+                )}
+                {filteredExerciseSuggestions.map((e, i) => (
+                  <div
+                    key={`${e}-${i}`}
+                    onClick={() => { setExercise(e); setOpenExSug(false); }}
+                    style={{ padding: "8px 10px", cursor: "pointer" }}
+                  >
+                    {e}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={() => { setExercise(""); setOpenExSug(false); }}
+            title="Borrar ejercicio"
+            aria-label="Borrar ejercicio"
+            style={{ ...clearBtn }}
+          >
+            ✕
+          </button>
+        </div>
       </div>
-      <datalist id="mg-list">
-        {[...new Set(allPairs.map(p => p.muscleGroup))].sort().map((g, i) => (
-          <option key={i} value={g} />
-        ))}
-      </datalist>
-
-      <label>Ejercicio</label>
-      <div style={row}>
-        <input
-          list="ex-list"
-          value={exercise}
-          onChange={(e) => setExercise(e.target.value)}
-          placeholder="Press banca, Sentadilla..."
-          ref={exRef}
-          style={input}
-        />
-        {exercise && <button onClick={() => setExercise("")} style={clearBtn}>✕</button>}
-      </div>
-      <datalist id="ex-list">
-        {exerciseOptions.map((e, i) => <option key={i} value={e} />)}
-      </datalist>
 
       {/* Gráfica */}
       {loading && <p>Cargando datos…</p>}
@@ -258,7 +417,7 @@ const ExerciseChart = ({ user, onBack }) => {
             <ul>
               {pointsByDay.map((p, i) => (
                 <li key={i}>
-                  {new Date(p.x).toLocaleDateString()} — {p.y} kg — {p.repsAvg ?? "-"} reps{" "}
+                  {new Date(p.x).toLocaleDateString()} — Power Score: {p.powerScore} — {p.repsAvg ?? "-"} reps{" "}
                   <button
                     onClick={() => {
                       setModalSeries(p.series);
@@ -281,48 +440,55 @@ const ExerciseChart = ({ user, onBack }) => {
         </>
       )}
 
-      {/* Tabla */}
+      {/* Lista agrupada por grupo muscular */}
       {allPairs.length > 0 && (
-        <>
-          <hr style={{ margin: "2rem 0" }} />
-          <h3>Acceso rápido a ejercicios</h3>
-          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "0.5rem" }}>
-            <thead>
-              <tr>
-                <th style={{ textAlign: "left", padding: "6px", borderBottom: "1px solid #ccc" }}>Grupo muscular</th>
-                <th style={{ textAlign: "left", padding: "6px", borderBottom: "1px solid #ccc" }}>Ejercicio</th>
-                <th style={{ padding: "6px", borderBottom: "1px solid #ccc" }}>Seleccionar</th>
-              </tr>
-            </thead>
-            <tbody>
-              {allPairs.map((p, i) => (
-                <tr key={i}>
-                  <td style={{ padding: "6px", borderBottom: "1px solid #eee" }}>{p.muscleGroup}</td>
-                  <td style={{ padding: "6px", borderBottom: "1px solid #eee" }}>{p.exercise}</td>
-                  <td style={{ textAlign: "center", padding: "6px", borderBottom: "1px solid #eee" }}>
-                    <button
-                      onClick={() => {
-                        setMuscleGroup(p.muscleGroup);
-                        setExercise(p.exercise);
-                        window.scrollTo({ top: 0, behavior: "smooth" });
-                      }}
-                      style={{
-                        padding: "6px 10px",
-                        fontSize: "14px",
-                        background: "#f0f0f0",
-                        border: "1px solid #ccc",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Ver gráfica
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
+        <div style={{ marginTop: "1.25rem" }}>
+          <h3>Resumen de ejercicios</h3>
+          {Object.entries(
+            allPairs.reduce((acc, p) => {
+              const g = p.muscleGroup || "Sin grupo";
+              if (!acc[g]) acc[g] = new Set();
+              acc[g].add(p.exercise);
+              return acc;
+            }, {})
+          ).map(([group, setEx]) => {
+            const exercises = Array.from(setEx).sort((a, b) => a.localeCompare(b));
+            return (
+              <details key={group} style={{ marginBottom: "0.75rem" }}>
+                <summary style={{ fontWeight: "bold", fontSize: "1.05rem", cursor: "pointer" }}>
+                  {group}
+                </summary>
+                <ul style={{ listStyle: "none", paddingLeft: "1rem", marginTop: "0.5rem" }}>
+                  {exercises.map((name) => (
+                    <li key={`${group}||${name}`} style={{ marginBottom: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMuscleGroup(group === "Sin grupo" ? "" : group);
+                          setExercise(name);
+                          setOpenGroupSug(false);
+                          setOpenExSug(false);
+                          window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                        style={{
+                          background: "transparent",
+                          border: "1px solid #ddd",
+                          borderRadius: 6,
+                          padding: "6px 10px",
+                          cursor: "pointer",
+                          width: "100%",
+                          textAlign: "left",
+                        }}
+                      >
+                        {name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            );
+          })}
+        </div>
       )}
 
       {/* Modal */}
@@ -333,6 +499,15 @@ const ExerciseChart = ({ user, onBack }) => {
         exercise={exercise}
         date={modalDate}
         series={modalSeries}
+        powerScore={modalSeries.length > 0 ? (() => {
+          const validSeries = modalSeries.map(s => ({
+            weight: typeof s.weight === "number" ? s.weight : 0,
+            reps: typeof s.reps === "number" ? s.reps : 10
+          }));
+          const totalReps = validSeries.reduce((sum, s) => sum + s.reps, 0);
+          const avgWeight = validSeries.length > 0 ? validSeries.reduce((sum, s) => sum + s.weight, 0) / validSeries.length : 0;
+          return Math.round(avgWeight * totalReps);
+        })() : null}
       />
     </div>
   );
