@@ -32,3 +32,4 @@ gymtracker-src-*.zip
 src/serviceAccountKey.json
 client_secret_*.json
 gymtracker-src-*.zip
+scripts/*.json

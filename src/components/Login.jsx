@@ -133,43 +133,40 @@ export default function Login() {
     try {
       window.open(window.location.href, "_blank");
     } catch {
-      window.location.href = window.location.href;
+      window.location.reload();
     }
   };
 
   return (
-    <div style={{ textAlign: "center", marginTop: "4rem", padding: "1rem", maxWidth: 520, marginInline: "auto" }}>
-      <h2 style={{ fontSize: "1.6rem", marginBottom: "0.75rem" }}>
+    <div className="login-panel login-screen">
+      <h2>
         Inicia sesión en <strong>Gym Tracker</strong>
       </h2>
 
       {isIOS && isStandalone ? (
         <>
-          <p style={{ color: "#444" }}>
+          <p className="login-copy">
             Estás usando la app desde la pantalla de inicio (PWA). En iPhone el inicio de sesión funciona mejor en Safari.
           </p>
-          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 12 }}>
-            <button onClick={openInSafari} style={{ padding: "12px 18px", fontSize: 16 }}>Abrir en Safari</button>
+          <div className="login-actions">
+            <button className="login-main-btn" onClick={openInSafari}>Abrir en Safari</button>
           </div>
-          <p style={{ marginTop: 10, color: "#999", fontSize: 13 }}>
+          <p className="login-note">
             Al abrir Safari, pulsa "Continuar con Google" y completa el flujo allí.
           </p>
         </>
       ) : (
         <>
-          <button
-            onClick={handleLogin}
-            style={{ padding: "12px 20px", fontSize: 16, borderRadius: 8, border: "1px solid #ccc", background: "#fff", cursor: "pointer" }}
-          >
+          <button className="login-main-btn" onClick={handleLogin}>
             Continuar con Google
           </button>
 
-          <p style={{ marginTop: 10, color: "#666" }}>{status}</p>
-          {lastError && <p style={{ marginTop: 6, color: "#b00020", fontSize: 13 }}>Detalle: {lastError}</p>}
+          <p className="login-status">{status}</p>
+          {lastError && <p className="login-error">Detalle: {lastError}</p>}
 
-          <div style={{ marginTop: 12, color: "#777", fontSize: 13 }}>
-            <p style={{ margin: 0 }}>Si al volver de Google sigues en esta pantalla, prueba:</p>
-            <ul style={{ textAlign: "left", display: "inline-block", marginTop: 6 }}>
+          <div className="login-help">
+            <p>Si al volver de Google sigues en esta pantalla, prueba:</p>
+            <ul>
               <li>Permitir ventanas emergentes (popups).</li>
               <li>Usar Safari si estás en iOS PWA.</li>
             </ul>

@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{db}/documents {
+
+    // =========================
+    // Helpers
+    // =========================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdminApp() {
+      return isSignedIn() && request.auth.token.adminApp == true;
+    }
+
+    // =========================
+    // Colección: workouts
+    // =========================
+    match /workouts/{id} {
+      allow read, write: if isAdminApp();
+
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.exercise is string
+                    && request.resource.data.muscleGroup is string
+                    && request.resource.data.weight is number
+                    && (!('reps' in request.resource.data) || request.resource.data.reps is number)
+                    && request.resource.data.timestamp is timestamp;
+
+      allow update, delete: if isSignedIn()
+                            && resource.data.uid == request.auth.uid
+                            && request.resource.data.uid == resource.data.uid;
+    }
+
+    // =========================
+    // Colección: users
+    // =========================
+    match /users/{uid} {
+      allow read, write: if isAdminApp();
+
+      allow read: if isSignedIn() && request.auth.uid == uid;
+
+      allow create: if isSignedIn()
+                    && request.auth.uid == uid
+                    && request.resource.data.uid == uid;
+
+      allow update, delete: if isSignedIn()
+                            && request.auth.uid == uid
+                            && resource.data.uid == uid
+                            && request.resource.data.uid == uid;
+
+      // Subcolección: exerciseMaster
+      match /exerciseMaster/{docId} {
+        allow read, write: if isAdminApp() || (isSignedIn() && request.auth.uid == uid);
+      }
+
+      // Subcolección: exerciseLibrary
+      match /exerciseLibrary/{docId} {
+        allow read, write: if isAdminApp() || (isSignedIn() && request.auth.uid == uid);
+      }
+    }
+
+    // =========================
+    // Colección: auditLogs (solo admin)
+    // =========================
+    match /auditLogs/{id} {
+      allow read, write: if isAdminApp();
+    }
+
+    // =========================
+    // Colección: plans
+    // =========================
+    match /plans/{id} {
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      allow create: if isSignedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.date is timestamp
+                    && request.resource.data.description is string
+                    && request.resource.data.routines is list;
+
+      allow update: if isSignedIn()
+                    && resource.data.uid == request.auth.uid
+                    && request.resource.data.uid == resource.data.uid
+                    && request.resource.data.date is timestamp
+                    && request.resource.data.description is string
+                    && request.resource.data.routines is list;
+
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // =========================
+    // Regla por defecto: denegar todo
+    // =========================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { collection, deleteDoc, getDocs, query, where, doc, limit } from "firebase/firestore";
 import { db } from "../firebase/config";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 
 const BATCH_SIZE = 200;
 
@@ -14,7 +15,10 @@ const DangerZone = ({ user }) => {
       if (!user) return;
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
-      const names = snapshot.docs.map((docSnap) => docSnap.data().exercise);
+      const names = snapshot.docs
+        .map((docSnap) => docSnap.data())
+        .filter((data) => !isMarkedDeleted(data))
+        .map((data) => data.exercise);
       const unique = [...new Set(names)].sort();
       setExercises(unique);
     };
@@ -76,19 +80,19 @@ const DangerZone = ({ user }) => {
   };
 
   return (
-    <div style={{ maxWidth: "600px", margin: "2rem auto", borderTop: "1px solid red", paddingTop: "2rem" }}>
-      <h2 style={{ color: "#c00", textAlign: "center" }}>Reseteo de datos</h2>
+    <div className="danger-zone-panel danger-zone">
+      <h2>Reseteo de datos</h2>
 
-      <button onClick={handleFullReset} disabled={isDeleting} style={{ marginBottom: "2rem", padding: "10px" }}>
+      <button className="danger-zone-main-btn" onClick={handleFullReset} disabled={isDeleting}>
         {isDeleting ? "Borrando..." : "Resetear toda la base de datos"}
       </button>
 
-      <div>
+      <div className="danger-zone-card">
         <p>Eliminar todos los registros de un ejercicio:</p>
         <select
+          className="danger-zone-select"
           value={exerciseToDelete}
           onChange={(e) => setExerciseToDelete(e.target.value)}
-          style={{ width: "100%", padding: "8px", marginBottom: "0.5rem" }}
         >
           <option value="">Selecciona un ejercicio</option>
           {exercises.map((ex, i) => (
@@ -97,7 +101,7 @@ const DangerZone = ({ user }) => {
             </option>
           ))}
         </select>
-        <button onClick={handleExerciseDelete} disabled={isDeleting} style={{ padding: "10px" }}>
+        <button className="danger-zone-delete-btn" onClick={handleExerciseDelete} disabled={isDeleting}>
           {isDeleting ? "Borrando..." : "Borrar ejercicio"}
         </button>
       </div>

@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { collection, getDocs, query, where, orderBy } from "firebase/firestore";
 import { db } from "../firebase/config";
 import { Line } from "react-chartjs-2";
+import { calculatePowerScore } from "../utils/calculatePowerScore";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 import {
   Chart as ChartJS,
   TimeScale,
@@ -25,103 +27,40 @@ const midnightLocal = (d) => {
   return x;
 };
 
-const ExerciseChart = ({ user, onBack }) => {
+const monthStartLocal = (value) => {
+  const d = midnightLocal(value);
+  d.setDate(1);
+  return d;
+};
+
+const formatMonthLabel = (value) =>
+  new Date(value).toLocaleDateString("es-ES", { month: "short", year: "numeric" });
+
+const ExerciseChart = ({
+  user,
+  onBack,
+  selectedExercise,
+  onSelectExercise,
+  onViewRegister,
+  onViewLibrary,
+}) => {
   const [allPairs, setAllPairs] = useState([]);
   const [muscleGroup, setMuscleGroup] = useState("");
   const [exercise, setExercise] = useState("");
-  const [exerciseOptions, setExerciseOptions] = useState([]);
   const [pointsByDay, setPointsByDay] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  const [modalOpen, setModalOpen] = useState(false);
-  const [modalSeries, setModalSeries] = useState([]);
-  const [modalDate, setModalDate] = useState(new Date());
+  const [chartMode, setChartMode] = useState("monthly"); // monthly | daily
 
   const [openDetailIndex, setOpenDetailIndex] = useState(null);
+  const [openMonthDetailIndex, setOpenMonthDetailIndex] = useState(null);
 
-  // Dropdown states & refs (mismo patrón que ExerciseForm)
-  const [openGroupSug, setOpenGroupSug] = useState(false);
-  const [openExSug, setOpenExSug] = useState(false);
-  const groupSugRef = useRef(null);
-  const exSugRef = useRef(null);
-
-  // Sugerencias únicas
-  const groupSuggestions = useMemo(
-    () => [...new Set(allPairs.map((p) => p.muscleGroup))].sort(),
-    [allPairs]
-  );
-
-  const filteredGroupSuggestions = useMemo(() => {
-    const q = (muscleGroup || "").toLowerCase().trim();
-    if (!q) return groupSuggestions.slice(0, 20);
-    return groupSuggestions
-      .filter((g) => (g || "").toLowerCase().includes(q))
-      .slice(0, 20);
-  }, [muscleGroup, groupSuggestions]);
-
-  const filteredExerciseSuggestions = useMemo(() => {
-    const q = (exercise || "").toLowerCase().trim();
-    if (!q) return exerciseOptions.slice(0, 20);
-    return exerciseOptions
-      .filter((e) => (e || "").toLowerCase().includes(q))
-      .slice(0, 20);
-  }, [exercise, exerciseOptions]);
-
-  const mgRef = useRef(null);
-  const exRef = useRef(null);
-
-  const row = { display: "flex", alignItems: "center", gap: "12px" };
-  const comboRow = {
-    display: "grid",
-    gridTemplateColumns: "auto 1fr auto auto 1fr auto", // Label, Input, X, Label, Input, X
-    alignItems: "center",
-    columnGap: "12px",
-  };
-  const input = {
-    flex: 1,
-    boxSizing: "border-box",
-    height: 36,
-    lineHeight: "36px",
-    padding: "0 10px",
-    fontSize: "0.9rem",
-    borderRadius: "10px",
-    border: "1px solid #ccc",
-    WebkitAppearance: "none",
-    appearance: "none",
-    transform: "translateY(8px)", // baja 8px el cuadro para alinear el eje
-  };
-  const clearBtn = {
-    flexShrink: 0,
-    boxSizing: "border-box",
-    background: "#eee",
-    border: "1px solid #ccc",
-    fontSize: "0.9rem",
-    cursor: "pointer",
-    padding: "0 10px",
-    borderRadius: "10px",
-    height: 36,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    lineHeight: 1,
-  };
-  const panel = {
-    background: "rgba(122, 134, 204, 0.5)",
-    border: "1px solid #e6e56f",
-    borderRadius: "10px",
-    padding: "10px",
-    marginTop: "6px",
-    marginBottom: "8px",
-  };
-  const leftLabel = {
-    fontWeight: "bold",
-    fontSize: "0.9rem",
-    minWidth: "72px",
-    textAlign: "left",
-    display: "flex",
-    alignItems: "center",
-    boxSizing: "border-box",
-    height: 36,
+  const syncSelection = (nextGroup, nextExercise) => {
+    const cleanGroup = String(nextGroup || "").trim();
+    const cleanExercise = String(nextExercise || "").trim();
+    if (!cleanExercise) return;
+    setMuscleGroup(cleanGroup);
+    setExercise(cleanExercise);
+    onSelectExercise?.({ muscleGroup: cleanGroup, exercise: cleanExercise });
   };
 
   useEffect(() => {
@@ -133,6 +72,7 @@ const ExerciseChart = ({ user, onBack }) => {
       const pairs = [];
       snap.docs.forEach((doc) => {
         const d = doc.data();
+        if (isMarkedDeleted(d)) return;
         const mg = d.muscleGroup || "";
         const ex = d.exercise || "";
         if (!mg || !ex) return;
@@ -154,13 +94,22 @@ const ExerciseChart = ({ user, onBack }) => {
   }, [user]);
 
   useEffect(() => {
-    if (!muscleGroup) {
-      setExerciseOptions([...new Set(allPairs.map((p) => p.exercise))].sort());
-      return;
-    }
-    const opts = allPairs.filter((p) => p.muscleGroup === muscleGroup).map((p) => p.exercise);
-    setExerciseOptions([...new Set(opts)].sort());
-  }, [muscleGroup, allPairs]);
+    if (!selectedExercise || typeof selectedExercise !== "object") return;
+
+    const nextGroup = String(selectedExercise.muscleGroup || "").trim();
+    const nextExercise = String(selectedExercise.exercise || "").trim();
+    if (!nextExercise) return;
+
+    setMuscleGroup(nextGroup);
+    setExercise(nextExercise);
+    setOpenDetailIndex(null);
+    setOpenMonthDetailIndex(null);
+  }, [selectedExercise]);
+
+  useEffect(() => {
+    setOpenDetailIndex(null);
+    setOpenMonthDetailIndex(null);
+  }, [chartMode]);
 
   useEffect(() => {
     if (!user || !muscleGroup || !exercise) {
@@ -185,12 +134,13 @@ const ExerciseChart = ({ user, onBack }) => {
             ? d.timestamp.toDate()
             : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
           return {
+            deleted: isMarkedDeleted(d),
             ok: !!ts && typeof d.weight === "number",
             timestamp: ts,
             weight: d.weight,
             reps: d.reps,
           };
-        }).filter(r => r.ok);
+        }).filter((r) => r.ok && !r.deleted);
 
         const buckets = new Map();
         rows.forEach((r) => {
@@ -202,16 +152,14 @@ const ExerciseChart = ({ user, onBack }) => {
         });
 
         const points = [];
-        for (let [key, series] of buckets) {
+        for (const series of buckets.values()) {
           const validSeries = series.map(s => ({
             weight: typeof s.weight === "number" ? s.weight : 0,
             reps: typeof s.reps === "number" ? s.reps : 10
           }));
 
           const totalReps = validSeries.reduce((sum, s) => sum + s.reps, 0);
-          const totalWeight = validSeries.reduce((sum, s) => sum + s.weight, 0);
-          const weightAvg = validSeries.length > 0 ? totalWeight / validSeries.length : 0;
-          const powerScore = Math.round(weightAvg * totalReps);
+          const powerScore = calculatePowerScore(validSeries);
 
           const first = series[0];
           points.push({
@@ -235,130 +183,210 @@ const ExerciseChart = ({ user, onBack }) => {
     run();
   }, [user, muscleGroup, exercise]);
 
-  useEffect(() => {
-    function handle(e) {
-      if (groupSugRef.current && !groupSugRef.current.contains(e.target)) setOpenGroupSug(false);
-      if (exSugRef.current && !exSugRef.current.contains(e.target)) setOpenExSug(false);
-    }
-    document.addEventListener("mousedown", handle);
-    return () => document.removeEventListener("mousedown", handle);
-  }, []);
+  const isMonthlyMode = chartMode === "monthly";
 
-  const chartData = {
-    datasets: [
-      {
-        label: "Power Score",
-        data: pointsByDay,
-        borderWidth: 2,
-        borderColor: "#007bff",
-        backgroundColor: "#007bff44",
-        tension: 0.2,
-        pointRadius: 4,
-        spanGaps: true,
-        parsing: false,
-      },
-    ],
-  };
+  const chartPoints = useMemo(() => {
+    if (!isMonthlyMode) return pointsByDay;
 
-  const chartOptions = {
-    responsive: true,
-    animation: false,
-    scales: {
-      x: {
-        type: "time",
-        time: {
-          unit: "day",
-          tooltipFormat: "dd/MM/yyyy",
-          displayFormats: { day: "dd/MM/yyyy" },
+    const monthlyBuckets = new Map();
+    pointsByDay.forEach((point) => {
+      const start = monthStartLocal(point.x);
+      const key = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}`;
+      if (!monthlyBuckets.has(key)) {
+        monthlyBuckets.set(key, { start, items: [] });
+      }
+      monthlyBuckets.get(key).items.push(point);
+    });
+
+    return Array.from(monthlyBuckets.values())
+      .map(({ start, items }) => {
+        const monthlyPower = Math.round(
+          items.reduce((acc, p) => acc + (Number(p.powerScore) || 0), 0) / items.length
+        );
+        const monthlyReps = Math.round(
+          items.reduce((acc, p) => acc + (Number(p.repsAvg) || 0), 0) / items.length
+        );
+        return {
+          x: start.getTime(),
+          y: monthlyPower,
+          powerScore: monthlyPower,
+          repsAvg: monthlyReps,
+          monthStart: start,
+          samples: items.length,
+          items: items.slice().sort((a, b) => a.x - b.x),
+        };
+      })
+      .sort((a, b) => a.x - b.x);
+  }, [isMonthlyMode, pointsByDay]);
+
+  const chartData = useMemo(
+    () => ({
+      datasets: [
+        {
+          label: isMonthlyMode ? "PowerScore mensual (promedio)" : "PowerScore diario",
+          data: chartPoints,
+          borderWidth: isMonthlyMode ? 3 : 2,
+          borderColor: "#2a62ff",
+          backgroundColor: isMonthlyMode ? "rgba(42, 98, 255, 0.20)" : "#2a62ff44",
+          fill: isMonthlyMode,
+          tension: isMonthlyMode ? 0.3 : 0.2,
+          pointRadius: isMonthlyMode ? 0 : 4,
+          spanGaps: true,
+          parsing: false,
         },
-        title: { display: true, text: "Fecha" },
+      ],
+    }),
+    [chartPoints, isMonthlyMode]
+  );
+
+  const chartOptions = useMemo(
+    () => ({
+      responsive: true,
+      animation: false,
+      scales: {
+        x: {
+          type: "time",
+          display: !isMonthlyMode,
+          grid: { display: !isMonthlyMode },
+          ticks: { display: !isMonthlyMode },
+          time: {
+            unit: "day",
+            tooltipFormat: "dd/MM/yyyy",
+            displayFormats: { day: "dd/MM/yyyy" },
+          },
+          title: { display: !isMonthlyMode, text: "Fecha" },
+        },
+        y: {
+          title: { display: true, text: "PowerScore" },
+          beginAtZero: false,
+        },
       },
-      y: {
-        title: { display: true, text: "Power Score" },
-        beginAtZero: false,
-      },
-    },
-    plugins: {
-      legend: { display: true },
-      tooltip: {
-        callbacks: {
-          label: (ctx) => `Power Score: ${ctx.parsed.y}`,
-          afterBody: (items) => {
-            const d = items[0]?.raw;
-            return d?.repsAvg ? [`Reps medias: ${d.repsAvg}`] : [];
+      plugins: {
+        legend: { display: true },
+        tooltip: {
+          callbacks: {
+            label: (ctx) =>
+              isMonthlyMode
+                ? `PowerScore medio: ${ctx.parsed.y}`
+                : `PowerScore: ${ctx.parsed.y}`,
+            afterBody: (items) => {
+              const d = items[0]?.raw;
+              if (!d) return [];
+              if (isMonthlyMode) {
+                const month = d.monthStart ? formatMonthLabel(d.monthStart) : "Mes";
+                const sessions = d.samples ? `Sesiones: ${d.samples}` : null;
+                return [month, sessions].filter(Boolean);
+              }
+              return d?.repsAvg ? [`Reps medias: ${d.repsAvg}`] : [];
+            },
           },
         },
       },
-    },
-  };
+    }),
+    [isMonthlyMode]
+  );
 
   return (
-    <div style={{ maxWidth: 700, margin: "0 auto", padding: "1rem" }}>
-      <button onClick={onBack} style={{ marginBottom: "1rem" }}>← Volver</button>
+    <div className="exercise-chart-shell chart-page">
+      <button className="chart-back" onClick={onBack}>← Volver</button>
       <h2>Progreso</h2>
+      {exercise ? (
+        <section className="chart-active-selection">
+          <span>Mostrando ahora</span>
+          <strong>{muscleGroup || "Sin grupo"} · {exercise}</strong>
+          <div className="chart-active-actions">
+            <button
+              type="button"
+              onClick={() => {
+                syncSelection(muscleGroup, exercise);
+                onViewRegister?.();
+              }}
+            >
+              Ir a registro
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                syncSelection(muscleGroup, exercise);
+                onViewLibrary?.();
+              }}
+            >
+              Ver ficha
+            </button>
+          </div>
+        </section>
+      ) : (
+        <p className="chart-selection-empty">Selecciona un ejercicio para ver su progreso.</p>
+      )}
+      <div className="chart-mode-switch">
+        <button
+          type="button"
+          className={`chart-mode-btn${isMonthlyMode ? " is-active" : ""}`}
+          onClick={() => setChartMode("monthly")}
+        >
+          Vista rápida mensual
+        </button>
+        <button
+          type="button"
+          className={`chart-mode-btn${!isMonthlyMode ? " is-active" : ""}`}
+          onClick={() => setChartMode("daily")}
+        >
+          Vista detalle diaria
+        </button>
+      </div>
 
       {/* Selector superior eliminado: se usa la lista agrupada de abajo */}
 
       {/* Gráfica */}
-      {loading && <p>Cargando datos…</p>}
-      {!loading && pointsByDay.length > 0 && (
+      {loading && <p className="chart-loading">Cargando datos…</p>}
+      {!loading && chartPoints.length > 0 && (
         <>
-          <div style={{ marginTop: "1rem" }}>
+          <div className="chart-plot">
             <Line data={chartData} options={chartOptions} />
           </div>
-          <div style={{ marginTop: "1rem", fontSize: "0.9rem" }}>
-            <strong>Puntos calculados</strong>
-            <ul>
-              {pointsByDay.map((p, i) => {
-                const isOpen = openDetailIndex === i;
-                return (
-                  <li key={i} style={{ marginBottom: isOpen ? "0.5rem" : 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ flex: 1 }}>
-                        {new Date(p.x).toLocaleDateString()} — Power Score: {p.powerScore} — {p.repsAvg ?? "-"} reps
-                      </span>
+          {isMonthlyMode ? (
+            <div className="chart-points">
+              <strong>Resumen mensual</strong>
+              <ul className="chart-points-list">
+                {chartPoints.map((point, i) => (
+                  <li className={`chart-point-item${openMonthDetailIndex === i ? " is-open" : ""}`} key={`m-${i}`}>
+                    <div className="chart-point-row">
                       <button
-                        onClick={() => setOpenDetailIndex(isOpen ? null : i)}
-                        style={{
-                          border: "none",
-                          background: "none",
-                          cursor: "pointer",
-                          verticalAlign: "middle",
-                        }}
-                        aria-expanded={isOpen}
-                        aria-label={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
-                        title={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                        type="button"
+                        className="chart-point-toggle"
+                        onClick={() => setOpenMonthDetailIndex(openMonthDetailIndex === i ? null : i)}
+                        aria-expanded={openMonthDetailIndex === i}
+                        aria-label={openMonthDetailIndex === i ? "Ocultar detalle del mes" : "Mostrar detalle del mes"}
                       >
-                        <Info size={16} color="#007bff" />
+                        <span className="chart-point-text">
+                          {formatMonthLabel(point.monthStart)}
+                        </span>
+                        <strong>{point.powerScore}</strong>
                       </button>
                     </div>
-
-                    {isOpen && (
-                      <div style={{
-                        border: "1px solid #e5e5e5",
-                        borderRadius: 8,
-                        padding: "6px 8px",
-                        marginTop: 6,
-                        background: "#fafafa",
-                      }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                    {openMonthDetailIndex === i && (
+                      <div className="chart-detail-card">
+                        <p className="chart-month-meta">
+                          Sesiones: <strong>{point.samples || 0}</strong> · Reps medias:{" "}
+                          <strong>{point.repsAvg ?? "-"}</strong>
+                        </p>
+                        <table className="chart-detail-table">
                           <thead>
                             <tr>
-                              <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
-                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
-                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                              <th>Día</th>
+                              <th>PowerScore</th>
+                              <th>Reps medias</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {[...p.series]
-                              .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                              .map((s, idx) => (
-                                <tr key={idx}>
-                                  <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
-                                    {s.timestamp ? s.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}
-                                  </td>
-                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{s.weight ?? "-"}</td>
-                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{s.reps ?? "-"}</td>
+                            {(point.items || [])
+                              .slice()
+                              .sort((a, b) => b.x - a.x)
+                              .map((dayPoint, idx) => (
+                                <tr key={`${point.x}-${idx}`}>
+                                  <td>{new Date(dayPoint.x).toLocaleDateString("es-ES")}</td>
+                                  <td>{dayPoint.powerScore ?? "-"}</td>
+                                  <td>{dayPoint.repsAvg ?? "-"}</td>
                                 </tr>
                               ))}
                           </tbody>
@@ -366,16 +394,70 @@ const ExerciseChart = ({ user, onBack }) => {
                       </div>
                     )}
                   </li>
-                );
-              })}
-            </ul>
-          </div>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="chart-points">
+              <strong>Puntos diarios</strong>
+              <ul className="chart-points-list">
+                {chartPoints.map((p, i) => {
+                  const isOpen = openDetailIndex === i;
+                  return (
+                    <li className={`chart-point-item${isOpen ? " is-open" : ""}`} key={i}>
+                      <div className="chart-point-row">
+                        <span className="chart-point-text">
+                          {new Date(p.x).toLocaleDateString()} — PowerScore: {p.powerScore} — {p.repsAvg ?? "-"} reps
+                        </span>
+                        <button
+                          className="chart-info-btn"
+                          onClick={() => setOpenDetailIndex(isOpen ? null : i)}
+                          aria-expanded={isOpen}
+                          aria-label={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                          title={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
+                        >
+                          <Info size={16} color="#007bff" />
+                        </button>
+                      </div>
+
+                      {isOpen && (
+                        <div className="chart-detail-card">
+                          <table className="chart-detail-table">
+                            <thead>
+                              <tr>
+                                <th>Hora</th>
+                                <th>Peso (kg)</th>
+                                <th>Reps</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[...p.series]
+                                .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                                .map((s, idx) => (
+                                  <tr key={idx}>
+                                    <td>
+                                      {s.timestamp ? s.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}
+                                    </td>
+                                    <td>{s.weight ?? "-"}</td>
+                                    <td>{s.reps ?? "-"}</td>
+                                  </tr>
+                                ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </>
       )}
 
       {/* Lista agrupada por grupo muscular */}
       {allPairs.length > 0 && (
-        <div style={{ marginTop: "1.25rem" }}>
+        <div className="chart-summary">
           <h3>Resumen de ejercicios</h3>
           {Object.entries(
             allPairs.reduce((acc, p) => {
@@ -387,30 +469,19 @@ const ExerciseChart = ({ user, onBack }) => {
           ).map(([group, setEx]) => {
             const exercises = Array.from(setEx).sort((a, b) => a.localeCompare(b));
             return (
-              <details key={group} style={{ marginBottom: "0.75rem" }}>
-                <summary style={{ fontWeight: "bold", fontSize: "1.05rem", cursor: "pointer" }}>
+              <details className="chart-group" key={group}>
+                <summary className="chart-group-title">
                   {group}
                 </summary>
-                <ul style={{ listStyle: "none", paddingLeft: "1rem", marginTop: "0.5rem" }}>
+                <ul className="chart-group-list">
                   {exercises.map((name) => (
-                    <li key={`${group}||${name}`} style={{ marginBottom: 6 }}>
+                    <li key={`${group}||${name}`}>
                       <button
+                        className="chart-group-btn"
                         type="button"
                         onClick={() => {
-                          setMuscleGroup(group === "Sin grupo" ? "" : group);
-                          setExercise(name);
-                          setOpenGroupSug(false);
-                          setOpenExSug(false);
+                          syncSelection(group === "Sin grupo" ? "" : group, name);
                           window.scrollTo({ top: 0, behavior: "smooth" });
-                        }}
-                        style={{
-                          background: "transparent",
-                          border: "1px solid #ddd",
-                          borderRadius: 6,
-                          padding: "6px 10px",
-                          cursor: "pointer",
-                          width: "100%",
-                          textAlign: "left",
                         }}
                       >
                         {name}

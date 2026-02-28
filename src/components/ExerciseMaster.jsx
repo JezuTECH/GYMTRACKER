@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { collection, doc, getDocs, query, setDoc, where, deleteDoc, getDoc } from "firebase/firestore";
 import { reauthenticateWithPopup, GoogleAuthProvider } from "firebase/auth";
 import { db, auth, googleProvider } from "../firebase/config";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 
 // Cache de token Drive (evita pedir permisos cada vez)
 let __driveToken = null;        // string
@@ -131,6 +132,7 @@ const ExerciseMaster = ({ user, onBack }) => {
       const pairs = [];
       snap.docs.forEach((doc) => {
         const d = doc.data();
+        if (isMarkedDeleted(d)) return;
         const mg = d.muscleGroup || "";
         const ex = d.exercise || "";
         if (!mg || !ex) return;

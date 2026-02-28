@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { collection, deleteDoc, doc, getDocs, query, where, limit } from "firebase/firestore";
 import { db } from "../firebase/config";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 
 const BATCH_SIZE = 200;
 
@@ -15,7 +16,10 @@ const DataReset = ({ user }) => {
       if (!user) return;
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
-      const names = snapshot.docs.map((docSnap) => docSnap.data().exercise);
+      const names = snapshot.docs
+        .map((docSnap) => docSnap.data())
+        .filter((data) => !isMarkedDeleted(data))
+        .map((data) => data.exercise);
       const unique = [...new Set(names)].sort();
       setExercises(unique);
     };

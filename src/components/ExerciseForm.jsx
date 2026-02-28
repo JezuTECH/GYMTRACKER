@@ -1,6 +1,7 @@
 // src/components/ExerciseForm.jsx
 import { useState, useEffect, useRef, useMemo } from "react";
 import { calculateWeightedAverage, calculateAverageReps } from "../utils/calculateAverages";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 // import CalcInfoModal from "./CalcInfoModal";
 import {
   collection,
@@ -13,7 +14,26 @@ import {
 } from "firebase/firestore";
 import { db, auth } from "../firebase/config";
 
-const ExerciseForm = ({ user, onViewChart }) => {
+// [2025-08-25] Motivo: evitar duplicados por espacios finales o múltiples espacios internos
+// [2025-08-27] Motivo: ocultar sugerencias de ejercicios cuando no hay grupo; mantener escritura libre.
+const normalizeText = (str) => (str ?? "")
+  .trim()
+  .replace(/\s+/g, " ");
+
+const triggerHaptic = (pattern = 10) => {
+  if (typeof navigator === "undefined") return;
+  if (typeof navigator.vibrate !== "function") return;
+  navigator.vibrate(pattern);
+};
+
+
+const ExerciseForm = ({
+  user,
+  selectedExercise,
+  onViewChart,
+  onViewLibrary,
+  onSelectExercise,
+}) => {
   const [exerciseName, setExerciseName] = useState("");
 
 // ✅ NUEVO BLOQUE: capturar parámetros de la URL al cargar
@@ -21,8 +41,10 @@ useEffect(() => {
   const params = new URLSearchParams(window.location.search);
   const ex = params.get("exercise");
   const mg = params.get("muscleGroup");
-  if (ex) setExerciseName(ex);
-  if (mg) setMuscleGroup(mg);
+// if (ex) setExerciseName(ex);
+// if (mg) setMuscleGroup(mg);
+  if (ex) setExerciseName(normalizeText(ex));
+  if (mg) setMuscleGroup(normalizeText(mg));
 }, []);
 
 // ✅ Mover aquí el de limpieza
@@ -50,14 +72,19 @@ useEffect(() => {
 
   const [weight, setWeight] = useState("");
   const [reps, setReps] = useState("");
+  const [weightSuggestions, setWeightSuggestions] = useState([]);
 
   const [suggestions, setSuggestions] = useState([]);
   const filteredSuggestions = useMemo(() => {
+    const mgClean = normalizeText(muscleGroup);
+    if (!mgClean) return []; // sin grupo ⇒ no sugerencias
     const q = (exerciseName || "").toLowerCase().trim();
     if (!q) return suggestions.slice(0, 20);
-    return suggestions.filter(n => (n || "").toLowerCase().includes(q)).slice(0, 20);
-  }, [exerciseName, suggestions]);
-  useEffect(() => {
+    return suggestions
+      .filter((n) => (n || "").toLowerCase().includes(q))
+      .slice(0, 20);
+  }, [exerciseName, suggestions, muscleGroup]);
+useEffect(() => {
     function handleOutside(e) {
       const t = e.target;
       if (sugBoxRef.current && !sugBoxRef.current.contains(t)) setOpenSug(false);
@@ -78,19 +105,46 @@ useEffect(() => {
   const [prevHeaderInfo, setPrevHeaderInfo] = useState(null);
 
   useEffect(() => {
+    const exercise = normalizeText(exerciseName);
+    const muscle = normalizeText(muscleGroup);
+    if (!exercise || !muscle) {
+      onSelectExercise?.(null);
+      return;
+    }
+    onSelectExercise?.({ exercise, muscleGroup: muscle });
+  }, [exerciseName, muscleGroup, onSelectExercise]);
+
+  useEffect(() => {
+    if (!selectedExercise || typeof selectedExercise !== "object") return;
+    const nextExercise = normalizeText(selectedExercise.exercise);
+    const nextGroup = normalizeText(selectedExercise.muscleGroup);
+    if (!nextExercise) return;
+
+    setExerciseName((previous) =>
+      normalizeText(previous) === nextExercise ? previous : nextExercise
+    );
+    setMuscleGroup((previous) =>
+      normalizeText(previous) === nextGroup ? previous : nextGroup
+    );
+  }, [selectedExercise]);
+
+  useEffect(() => {
     if (!user) return;
     const fetchExercises = async () => {
       const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
       const snapshot = await getDocs(q);
 
-      const all = snapshot.docs.map((doc) => ({
-        exercise: doc.data().exercise,
-        muscleGroup: doc.data().muscleGroup || "",
-      }));
+      const all = snapshot.docs
+        .map((doc) => doc.data())
+        .filter((data) => !isMarkedDeleted(data))
+        .map((data) => ({
+          exercise: data.exercise,
+          muscleGroup: data.muscleGroup || "",
+        }));
       setAllExercises(all);
 
-      setSuggestions([...new Set(all.map((doc) => doc.exercise))].sort());
-      setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].sort());
+      setSuggestions([]); // [2025-08-27] Sin grupo, ocultamos sugerencias
+setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].sort());
       fetchSummary(all);
     };
     fetchExercises();
@@ -113,6 +167,7 @@ useEffect(() => {
       setLastTimestamp(null);
       setHeaderInfo(null);
       setPrevHeaderInfo(null);
+      setWeightSuggestions([]);
       return;
     }
 
@@ -131,6 +186,7 @@ useEffect(() => {
       setLastTimestamp(null);
       setHeaderInfo(null);
       setPrevHeaderInfo(null);
+      setWeightSuggestions([]);
       return;
     }
 
@@ -140,7 +196,7 @@ useEffect(() => {
     const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
     const docsRaw = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
-    const docs = docsRaw.filter(d => d.delete !== true); // incluye sin campo y con false
+    const docs = docsRaw.filter((d) => !isMarkedDeleted(d)); // incluye sin campo y con false
 
     // Agrupar por día y ordenar descendente
     const byDay = new Map();
@@ -155,6 +211,23 @@ useEffect(() => {
     }
     const dayEntries = Array.from(byDay.entries())
       .sort((a, b) => b[1].date - a[1].date); // desc
+
+    const recentDayWeights = dayEntries
+      .slice(0, 3)
+      .map(([, entry]) => calculateWeightedAverage(entry.rows))
+      .filter((value) => typeof value === "number" && Number.isFinite(value))
+      .map((value) => Number(value.toFixed(1)));
+
+    const nextSuggestions = [...new Set(recentDayWeights)];
+    if (nextSuggestions.length > 1) {
+      const avgRecent = Number(
+        (nextSuggestions.reduce((sum, value) => sum + value, 0) / nextSuggestions.length).toFixed(1)
+      );
+      if (!nextSuggestions.includes(avgRecent)) {
+        nextSuggestions.push(avgRecent);
+      }
+    }
+    setWeightSuggestions(nextSuggestions);
 
     const latestEntry = dayEntries[0];
     const prevEntry   = dayEntries[1]; // puede ser undefined
@@ -242,6 +315,9 @@ useEffect(() => {
       setLastReps(null);
       setLastTimestamp(null);
       setHeaderInfo(null);
+      setPrevHeaderInfo(null);
+      setOpenInline(null);
+      setWeightSuggestions([]);
       return;
     }
     recomputeLastForSelection();
@@ -278,7 +354,9 @@ useEffect(() => {
           const pad2 = (n) => String(n).padStart(2, "0");
           const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
-          const docs = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
+          const docs = snapshot.docs
+            .map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }))
+            .filter((data) => !isMarkedDeleted(data));
 
           // Latest day
           let latestKey = null;
@@ -321,12 +399,14 @@ useEffect(() => {
 
             const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : "-";
             const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : "-";
+            const powerScore = calcPowerFromRows(debugRows);
 
             return {
               exercise: ex.exercise,
               muscleGroup: docsOfDay[0].muscleGroup || ex.muscleGroup || "",
               weight: calcWeight,
               reps: repsAvg,
+              _powerScore: powerScore,
               _lastDay: latestDate,
               _calcWeight: calcWeight,
               _repsAvg: repsAvg,
@@ -338,6 +418,7 @@ useEffect(() => {
               muscleGroup: ex.muscleGroup || "",
               weight: "-",
               reps: "-",
+              _powerScore: 0,
               _lastDay: null,
               _calcWeight: null,
               _repsAvg: null,
@@ -350,6 +431,7 @@ useEffect(() => {
             muscleGroup: ex.muscleGroup || "",
             weight: "-",
             reps: "-",
+            _powerScore: 0,
             _lastDay: null,
             _calcWeight: null,
             _repsAvg: null,
@@ -371,8 +453,13 @@ useEffect(() => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!exerciseName || !weight) return;
-
+    triggerHaptic(10);
+//  if (!exerciseName || !weight) return;
+    // Normalizar textos para evitar duplicados por espacios
+    const cleanExercise = normalizeText(exerciseName);
+    const cleanGroup = normalizeText(muscleGroup);
+    if (!cleanExercise || !weight) return;
+ 
     // reps opcional, validar si viene
     let repsNum = null;
     if (reps !== "") {
@@ -394,8 +481,10 @@ useEffect(() => {
 
     try {
       await addDoc(collection(db, "workouts"), {
-        exercise: exerciseName,
-        muscleGroup,
+//       exercise: exerciseName,
+//      muscleGroup,
+        exercise: cleanExercise,
+        muscleGroup: cleanGroup,
         weight: parseFloat(weight),
         reps: repsNum,
         timestamp: new Date(),
@@ -406,16 +495,24 @@ useEffect(() => {
       });
 
       // refrescar sugerencias / resumen
-      if (!suggestions.includes(exerciseName) && muscleGroup) {
+//    if (!suggestions.includes(exerciseName) && muscleGroup) {
+      if (!suggestions.includes(cleanExercise) && cleanGroup) {
         const filtered = allExercises
-          .filter((ex) => ex.muscleGroup === muscleGroup)
-          .map((ex) => ex.exercise);
-        const updated = [...new Set([...filtered, exerciseName])].sort();
+//       .filter((ex) => ex.muscleGroup === muscleGroup)
+//          .map((ex) => ex.exercise);
+//        const updated = [...new Set([...filtered, exerciseName])].sort();
+          .filter((ex) => normalizeText(ex.muscleGroup) === cleanGroup)
+          .map((ex) => normalizeText(ex.exercise));
+        const updated = [...new Set([...filtered, cleanExercise])].sort();
         setSuggestions(updated);
       }
-      const updatedAll = [...allExercises, { exercise: exerciseName, muscleGroup }];
+//    const updatedAll = [...allExercises, { exercise: exerciseName, muscleGroup }];
+      const updatedAll = [...allExercises, { exercise: cleanExercise, muscleGroup: cleanGroup }];
       setAllExercises(updatedAll);
-      setGroupSuggestions([...new Set(updatedAll.map((d) => d.muscleGroup).filter(Boolean))].sort());
+//    setGroupSuggestions([...new Set(updatedAll.map((d) => d.muscleGroup).filter(Boolean))].sort());
+      setGroupSuggestions([...new Set(updatedAll.map((d) => normalizeText(d.muscleGroup)).filter(Boolean))].sort());
+      setExerciseName(cleanExercise);
+      setMuscleGroup(cleanGroup);
       fetchSummary(updatedAll);
 
       // limpiar lo justo: mantener grupo y ejercicio para facilitar series consecutivas
@@ -443,6 +540,11 @@ useEffect(() => {
     setLastWeight(null);
     setLastReps(null);
     setLastTimestamp(null);
+    setHeaderInfo(null);
+    setPrevHeaderInfo(null);
+    setOpenInline(null);
+    setWeightSuggestions([]);
+    onSelectExercise?.(null);
     setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
     requestAnimationFrame(() => muscleGroupInputRef.current?.focus());
   };
@@ -455,13 +557,20 @@ useEffect(() => {
 
   // Mantener sugerencias de ejercicios en sync con muscleGroup
   useEffect(() => {
-    if (!muscleGroup) {
-      setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
+//  if (!muscleGroup) {
+//     setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
+//     return; }
+// const filtered = allExercises
+//    .filter((ex) => ex.muscleGroup === muscleGroup)
+//    .map((ex) => ex.exercise);
+    const mgClean = normalizeText(muscleGroup);
+    if (!mgClean) {
+      setSuggestions([...new Set(allExercises.map((d) => normalizeText(d.exercise)))].sort());
       return;
     }
     const filtered = allExercises
-      .filter((ex) => ex.muscleGroup === muscleGroup)
-      .map((ex) => ex.exercise);
+      .filter((ex) => normalizeText(ex.muscleGroup) === mgClean)
+      .map((ex) => normalizeText(ex.exercise));
     setSuggestions([...new Set(filtered)].sort());
   }, [muscleGroup, allExercises]);
 
@@ -471,33 +580,32 @@ useEffect(() => {
     setLastWeight(null);
     setLastReps(null);
     setLastTimestamp(null);
+    setHeaderInfo(null);
+    setPrevHeaderInfo(null);
+    setOpenInline(null);
+    setWeightSuggestions([]);
+    onSelectExercise?.(null);
     requestAnimationFrame(() => exerciseInputRef.current?.focus());
   };
 
-  // Estilos
-  const fieldRowStyle = {
-    display: "flex",
-    alignItems: "center",
-    gap: "6px",
-    marginBottom: "0.5rem",
+  const adjustWeight = (delta) => {
+    setWeight((prev) => {
+      if (prev === "" && delta < 0) return "";
+      const base = prev === "" ? 0 : parseFloat(prev);
+      const safeBase = Number.isFinite(base) ? base : 0;
+      const next = Math.max(0, safeBase + delta);
+      return String(next);
+    });
   };
-  const inputStyle = {
-    flex: 1,
-    padding: "16px",
-    fontSize: "1.1rem",
-    borderRadius: "8px",
-    border: "1px solid #ccc",
-  };
-  const clearBtnStyle = {
-    flexShrink: 0,
-    background: "#ccc", // antes #eee
-    border: "none",
-    fontSize: "1.1rem",
-    cursor: "pointer",
-    padding: "8px 10px",
-    borderRadius: "6px",
-    lineHeight: 1,
-    color: "black" // añadido
+
+  const adjustReps = (delta) => {
+    setReps((prev) => {
+      if (prev === "" && delta < 0) return "";
+      const base = prev === "" ? 0 : parseInt(prev, 10);
+      const safeBase = Number.isFinite(base) ? base : 0;
+      const next = Math.min(999, Math.max(1, safeBase + delta));
+      return String(next);
+    });
   };
 
   // Helper para fecha DD/MM/AAAA (día semana)
@@ -512,89 +620,52 @@ useEffect(() => {
   };
 
   return (
-    <>
-      <form onSubmit={handleSubmit} style={{ maxWidth: "400px", margin: "2rem auto", 
-                                             justifyContent: "center", padding: "0 1rem" }}>
+    <div className="exercise-form-shell">
+      <form className="exercise-form-card tracker-form" onSubmit={handleSubmit}>
         <h2>Registrar ejercicio</h2>
 
         {/* Grupo muscular y ejercicio - bloque estilizado */}
-        <div style={{
-          backgroundColor: "#a8b1e2ff",
-          padding: "1.5rem",
-          borderRadius: "10px",
-          marginBottom: "1rem",
-          border: "2px solid #dbde41ff",
-        }}>
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.5rem",
-            marginBottom: "0.5rem",
-            justifyContent: "center",
-          }}>
-            <label htmlFor="muscleGroup" style={{
-              fontWeight: "bold",
-              fontSize: "1rem",
-              minWidth: "80px",
-              textAlign: "left",
-              display: "inline-block",
-              marginRight: "0.5rem",
-              lineHeight: "1.2",
-              verticalAlign: "baseline",
-              marginTop: "-12px",
-            }}>Grupo:</label>
-            <div ref={groupSugRef} style={{ position: "relative", flex: 1 }}>
+        <div className="exercise-selector-card">
+          <div className="exercise-selector-row">
+            <label className="exercise-selector-label" htmlFor="muscleGroup">Grupo:</label>
+            <div className="exercise-suggest-wrap" ref={groupSugRef}>
               <input
                 id="muscleGroup"
                 type="text"
                 value={muscleGroup}
                 onChange={(e) => { setMuscleGroup(e.target.value); setOpenGroupSug(true); }}
                 onFocus={() => setOpenGroupSug(true)}
+                onBlur={(e) => setMuscleGroup(normalizeText(e.target.value))}
                 placeholder="Escribe grupo…"
                 ref={muscleGroupInputRef}
-                style={{
-                  width: "100%",
-                  fontSize: "0.95rem",
-                  padding: "7px 15px",
-                  borderRadius: "12px",
-                  border: "1px solid #ccc",
-                }}
               />
               {openGroupSug && (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "100%",
-                    left: 0,
-                    right: 0,
-                    background: "#fff",
-                    border: "1px solid #ddd",
-                    borderTop: "none",
-                    zIndex: 100,
-                    maxHeight: 260,
-                    overflowY: "auto",
-                    borderBottomLeftRadius: 12,
-                    borderBottomRightRadius: 12,
-                  }}
-                >
+                  <div
+                    className="exercise-suggest-menu"
+                  >
                   {filteredGroupSuggestions.length === 0 && muscleGroup.trim() && (
-                    <div style={{ padding: "8px 10px", color: "#777" }}>
+                    <div className="exercise-suggest-empty">
                       No hay resultados para “{muscleGroup.trim()}”.
                     </div>
                   )}
                   {filteredGroupSuggestions.map((g, i) => (
                     <div
+                      className="exercise-suggest-item"
                       key={`${g}-${i}`}
-                      onClick={() => {
-                        setMuscleGroup(g);
+ //                    onClick={() => {
+ //                     setMuscleGroup(g);
+                       onClick={() => {
+                        const cleanG = normalizeText(g);
+                        setMuscleGroup(cleanG);
                         // Al seleccionar grupo, recalcular sugerencias de ejercicios por ese grupo
                         const filtered = allExercises
-                          .filter((ex) => ex.muscleGroup === g)
-                          .map((ex) => ex.exercise);
+//                        .filter((ex) => ex.muscleGroup === g)
+//                       .map((ex) => ex.exercise);
+                          .filter((ex) => normalizeText(ex.muscleGroup) === cleanG)
+                          .map((ex) => normalizeText(ex.exercise));
                         setSuggestions([...new Set(filtered)].sort());
                         setOpenGroupSug(false);
                       }}
-                      style={{ padding: "8px 10px", cursor: "pointer" }}
                     >
                       {g}
                     </div>
@@ -606,73 +677,39 @@ useEffect(() => {
               <button
                 type="button"
                 onClick={handleClearMuscleGroup}
-                style={{ ...clearBtnStyle, marginTop: "-14px", alignSelf: "center" }}
+                className="exercise-clear-btn"
               >✕</button>
             )}
           </div>
 
-          <div style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.5rem",
-            marginBottom: "0.75rem",
-            justifyContent: "center",
-          }}>
-            <label htmlFor="exerciseName" style={{
-              fontWeight: "bold",
-              fontSize: "1rem",
-              minWidth: "80px",
-              textAlign: "left",
-              display: "inline-block",
-              marginRight: "0.5rem",
-              lineHeight: "1.2",
-              verticalAlign: "baseline",
-              marginTop: "-14px",
-            }}>Ejercicio:</label>
-            <div ref={sugBoxRef} style={{ position: "relative", flex: 1 }}>
+          <div className="exercise-selector-row">
+            <label className="exercise-selector-label" htmlFor="exerciseName">Ejercicio:</label>
+            <div className="exercise-suggest-wrap" ref={sugBoxRef}>
               <input
                 id="exerciseName"
                 type="text"
                 value={exerciseName}
                 onChange={(e) => { setExerciseName(e.target.value); setOpenSug(true); }}
                 onFocus={() => setOpenSug(true)}
+                onBlur={(e) => setExerciseName(normalizeText(e.target.value))}
                 placeholder="Escribe un ejercicio…"
                 ref={exerciseInputRef}
-                style={{
-                  width: "100%",
-                  fontSize: "0.95rem",
-                  padding: "7px 15px",
-                  borderRadius: "12px",
-                  border: "1px solid #ccc",
-                }}
               />
-              {openSug && (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: "100%",
-                    left: 0,
-                    right: 0,
-                    background: "#fff",
-                    border: "1px solid #ddd",
-                    borderTop: "none",
-                    zIndex: 100,
-                    maxHeight: 260,
-                    overflowY: "auto",
-                    borderBottomLeftRadius: 12,
-                    borderBottomRightRadius: 12,
-                  }}
+              {openSug && normalizeText(muscleGroup) && (
+          <div
+                  className="exercise-suggest-menu"
                 >
-                  {filteredSuggestions.length === 0 && exerciseName.trim() && (
-                    <div style={{ padding: "8px 10px", color: "#777" }}>
+                  { normalizeText(muscleGroup) && filteredSuggestions.length === 0 && exerciseName.trim() && (
+                    <div className="exercise-suggest-empty">
                       No hay resultados para “{exerciseName.trim()}”.
                     </div>
                   )}
                   {filteredSuggestions.map((ex, i) => (
                     <div
+                      className="exercise-suggest-item"
                       key={`${ex}-${i}`}
-                      onClick={() => { setExerciseName(ex); setOpenSug(false); }}
-                      style={{ padding: "8px 10px", cursor: "pointer" }}
+//                    onClick={() => { setExerciseName(ex); setOpenSug(false); }}
+                      onClick={() => { setExerciseName(normalizeText(ex)); setOpenSug(false); }}
                     >
                       {ex}
                     </div>
@@ -684,7 +721,7 @@ useEffect(() => {
               <button
                 type="button"
                 onClick={handleClearExercise}
-                style={{ ...clearBtnStyle, marginTop: "-14px", alignSelf: "center" }}
+                className="exercise-clear-btn"
               >✕</button>
             )}
           </div>
@@ -700,7 +737,7 @@ useEffect(() => {
         {/* Último registro */}
         {headerInfo && (
           <>
-          <p style={{ fontSize: "0.9rem", color: "gray", display: "flex", alignItems: "center", gap: 8 }}>
+          <p className="exercise-headline">
             <span>
               <strong>
                 {(() => {
@@ -733,33 +770,20 @@ useEffect(() => {
               title="Ver detalle del cálculo"
               aria-label="Ver detalle del cálculo"
               aria-expanded={openInline === 'last'}
-              style={{
-                padding: "2px 5px",
-                borderRadius: 4,
-                border: "1px solid #ddd",
-                background: "#f6f6f6",
-                cursor: "pointer",
-                fontSize: "0.92rem",
-                lineHeight: 1,
-                minWidth: 0,
-                height: "1.5em",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
+              className="exercise-info-btn"
             >
               ℹ️
             </button>
           </p>
           {openInline === 'last' && headerInfo && Array.isArray(headerInfo._debugRows) && (
-            <div style={{
+            <div className="exercise-detail-card" style={{
               border: "1px solid #e5e5e5",
               borderRadius: 8,
               padding: "6px 8px",
               margin: "6px 0 10px",
               background: "#fafafa",
             }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+              <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
                 <thead>
                   <tr>
                     <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
@@ -789,7 +813,7 @@ useEffect(() => {
         {/* Penúltimo registro */}
         {prevHeaderInfo && (
           <>
-          <p style={{ fontSize: "0.9rem", color: "gray", display: "flex", alignItems: "center", gap: 8 }}>
+          <p className="exercise-headline">
             <span>
               <strong>
                 {(() => {
@@ -809,33 +833,20 @@ useEffect(() => {
               title="Ver detalle del cálculo (penúltima vez)"
               aria-label="Ver detalle del cálculo (penúltima vez)"
               aria-expanded={openInline === 'prev'}
-              style={{
-                padding: "2px 5px",
-                borderRadius: 4,
-                border: "1px solid #ddd",
-                background: "#f6f6f6",
-                cursor: "pointer",
-                fontSize: "0.92rem",
-                lineHeight: 1,
-                minWidth: 0,
-                height: "1.5em",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
+              className="exercise-info-btn"
             >
               ℹ️
             </button>
           </p>
           {openInline === 'prev' && prevHeaderInfo && Array.isArray(prevHeaderInfo._debugRows) && (
-            <div style={{
+            <div className="exercise-detail-card" style={{
               border: "1px solid #e5e5e5",
               borderRadius: 8,
               padding: "6px 8px",
               margin: "6px 0 10px",
               background: "#fafafa",
             }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+              <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
                 <thead>
                   <tr>
                     <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
@@ -862,63 +873,102 @@ useEffect(() => {
           </>
         )}
 
-        <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-end", marginBottom: "1rem" }}>
-          <div style={{ flex: 1 }}>
+        <div className="exercise-entry-grid">
+          <div className="exercise-entry-field">
             <label htmlFor="weight">Peso (kg):</label>
-            <input
-              id="weight"
-              type="number"
-              value={weight}
-              onChange={(e) => setWeight(e.target.value)}
-              placeholder="Peso en kg"
-              inputMode="decimal"
-              style={{
-                width: "100%",
-                padding: "12px",
-                fontSize: "1rem",
-                borderRadius: "8px",
-                border: "1px solid #ccc",
-              }}
-            />
+            <div className="exercise-stepper-field">
+              <input
+                id="weight"
+                type="number"
+                value={weight}
+                onChange={(e) => setWeight(e.target.value)}
+                placeholder="Peso en kg"
+                inputMode="decimal"
+                list={weightSuggestions.length > 0 ? "weight-suggestions" : undefined}
+                className="exercise-stepper-input"
+              />
+              <div className="exercise-stepper-buttons">
+                <button type="button" className="exercise-stepper-btn" onClick={() => adjustWeight(-1)} aria-label="Reducir peso">−</button>
+                <button type="button" className="exercise-stepper-btn" onClick={() => adjustWeight(1)} aria-label="Aumentar peso">+</button>
+              </div>
+            </div>
+            {weightSuggestions.length > 0 && (
+              <datalist id="weight-suggestions">
+                {weightSuggestions.map((suggestedWeight, index) => (
+                  <option key={`${suggestedWeight}-${index}`} value={String(suggestedWeight)} />
+                ))}
+              </datalist>
+            )}
           </div>
-          <div style={{ flex: 1 }}>
+          <div className="exercise-entry-field">
             <label htmlFor="reps">Repeticiones:</label>
-            <input
-              id="reps"
-              type="number"
-              value={reps}
-              onChange={(e) => setReps(e.target.value)}
-              placeholder="Ej: 8, 10, 12…"
-              inputMode="numeric"
-              min={1}
-              max={999}
-              style={{
-                width: "100%",
-                padding: "12px",
-                fontSize: "1rem",
-                borderRadius: "8px",
-                border: "1px solid #ccc",
-              }}
-            />
+            <div className="exercise-stepper-field">
+              <input
+                id="reps"
+                type="number"
+                value={reps}
+                onChange={(e) => setReps(e.target.value)}
+                placeholder="Ej: 8, 10, 12…"
+                inputMode="numeric"
+                min={1}
+                max={999}
+                className="exercise-stepper-input"
+              />
+              <div className="exercise-stepper-buttons">
+                <button type="button" className="exercise-stepper-btn" onClick={() => adjustReps(-1)} aria-label="Reducir repeticiones">−</button>
+                <button type="button" className="exercise-stepper-btn" onClick={() => adjustReps(1)} aria-label="Aumentar repeticiones">+</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <button type="submit" style={{ width: "100%", padding: "12px", fontSize: "1rem" }}>Guardar</button>
-        {saveStatus === "ok" && <p style={{ color: "green", marginTop: "0.5rem" }}>✅ Guardado correctamente</p>}
-        {saveStatus === "nok" && <p style={{ color: "red", marginTop: "0.5rem" }}>❌ Error al guardar</p>}
+        <div className="exercise-actions">
+          <div className="exercise-actions-primary">
+            <button className="exercise-save-btn exercise-action-btn" type="submit">Guardar</button>
+          </div>
 
-        {exerciseName && (
-          <button
-            type="button"
-            onClick={() => onViewChart(exerciseName)}
-            style={{ width: "100%", marginTop: "0.5rem", backgroundColor: "#eee", padding: "10px", fontSize: "1rem" }}
-          >
-            Ver progreso
-          </button>
-        )}
+          {exerciseName && (
+            <div className="exercise-actions-secondary">
+              <button
+                className="exercise-progress-btn exercise-action-btn"
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  const selected = {
+                    exercise: normalizeText(exerciseName),
+                    muscleGroup: normalizeText(muscleGroup),
+                  };
+                  onSelectExercise?.(selected);
+                  onViewChart();
+                }}
+              >
+                Ver progreso
+              </button>
+
+              <button
+                className="exercise-library-btn exercise-action-btn"
+                type="button"
+                onClick={() => {
+                  triggerHaptic(10);
+                  const selected = {
+                    exercise: normalizeText(exerciseName),
+                    muscleGroup: normalizeText(muscleGroup),
+                  };
+                  onSelectExercise?.(selected);
+                  onViewLibrary?.();
+                }}
+              >
+                Ver ficha
+              </button>
+            </div>
+          )}
+        </div>
+
+        {saveStatus === "ok" && <p className="exercise-save-state is-ok">✅ Guardado correctamente</p>}
+        {saveStatus === "nok" && <p className="exercise-save-state is-error">❌ Error al guardar</p>}
 
         {/* Resumen */}
-        <div style={{ overflowX: "auto", marginTop: "2rem" }}>
+        <div className="exercise-summary-panel">
           <h3>Resumen de ejercicios</h3>
           {Object.entries(summaryData.reduce((acc, item) => {
             const group = item.muscleGroup || "Sin grupo";
@@ -926,105 +976,96 @@ useEffect(() => {
             acc[group].push(item);
             return acc;
           }, {})).map(([group, exercises], i) => (
-            <details key={i} style={{ marginBottom: "1rem" }}>
-              <summary style={{ fontWeight: "bold", fontSize: "1.05rem", cursor: "pointer" }}>
+            <details className="exercise-summary-group" key={i}>
+              <summary className="exercise-summary-group-title">
                 {group}
               </summary>
-              <ul style={{ listStyle: "none", paddingLeft: "1rem", marginTop: "0.5rem" }}>
-                {exercises.map((item, index) => (
-                  <li
-                    key={index}
-                    style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "0.5rem", cursor: "pointer" }}
-                    onClick={() => {
-                      setExerciseName(item.exercise);
-                      setMuscleGroup(item.muscleGroup);
-                      setLastWeight(item._calcWeight && item._calcWeight !== "-" ? item._calcWeight : null);
-                      setLastReps(item._repsAvg && item._repsAvg !== "-" ? item._repsAvg : null);
-                      setLastTimestamp(item._lastDay ? item._lastDay.toLocaleString() : null);
-                      const filtered = allExercises
-                        .filter((ex) => ex.muscleGroup === item.muscleGroup)
-                        .map((ex) => ex.exercise);
-                      setSuggestions([...new Set(filtered)].sort());
-                      setOpenSug(false);
-                      setOpenGroupSug(false);
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div>
-                        <strong>{item.exercise}</strong> — {item.weight} kg × {item.reps} reps
-                      </div>
-                      <button
-                        type="button"
-                        onClick={e => {
-                          e.stopPropagation();
-                          const key = `${item.muscleGroup}||${item.exercise}`;
-                          setOpenSummaryKey(openSummaryKey === key ? null : key);
-                        }}
-                        title="Ver detalle del día"
-                        aria-label="Ver detalle del día"
-                        aria-expanded={openSummaryKey === `${item.muscleGroup}||${item.exercise}`}
-                        style={{
-                          padding: "2px 5px",
-                          borderRadius: 4,
-                          border: "1px solid #ddd",
-                          background: "var(--info-button-bg, #f6f6f6)",
-                          cursor: "pointer",
-                          fontSize: "0.92rem",
-                          lineHeight: 1,
-                          minWidth: 0,
-                          height: "1.5em",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          marginLeft: 8
-                        }}
-                      >
-                        ℹ️
-                      </button>
-                    </div>
+              <ul className="exercise-summary-list">
+                {exercises.map((item, index) => {
+                  const summaryKey = `${item.muscleGroup}||${item.exercise}`;
+                  const itemPowerScore = Number(item._powerScore) || 0;
+                  const lastDayLabel = item._lastDay ? formatDateLabel(item._lastDay) : "Sin fecha";
 
-                    {openSummaryKey === `${item.muscleGroup}||${item.exercise}` && Array.isArray(item._debugRows) && (
-                      <div style={{
-                        border: "1px solid #e5e5e5",
-                        borderRadius: 8,
-                        padding: "6px 8px",
-                        margin: "6px 0 2px",
-                        background: "#fafafa",
-                      }}>
-                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
-                          <thead>
-                            <tr>
-                              <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
-                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
-                              <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {[...item._debugRows]
-                              .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                              .map((r, idx2) => (
-                                <tr key={idx2}>
-                                  <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
-                                    {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-                                  </td>
-                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
-                                  <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
-                                </tr>
-                              ))}
-                          </tbody>
-                        </table>
+                  return (
+                    <li
+                      className="exercise-summary-item"
+                      key={index}
+                      onClick={() => {
+   //                   setExerciseName(item.exercise);
+   //                   setMuscleGroup(item.muscleGroup);
+                        setExerciseName(normalizeText(item.exercise));
+                        setMuscleGroup(normalizeText(item.muscleGroup));
+                        setLastWeight(item._calcWeight && item._calcWeight !== "-" ? item._calcWeight : null);
+                        setLastReps(item._repsAvg && item._repsAvg !== "-" ? item._repsAvg : null);
+                        setLastTimestamp(item._lastDay ? item._lastDay.toLocaleString() : null);
+                        const filtered = allExercises
+    .filter((ex) => normalizeText(ex.muscleGroup) === normalizeText(item.muscleGroup))
+    .map((ex) => normalizeText(ex.exercise));
+  setSuggestions([...new Set(filtered)].sort());
+  setOpenSug(false);
+                        setOpenGroupSug(false);
+                      }}
+                    >
+                      <div className="exercise-summary-row">
+                        <strong className="exercise-summary-title">{item.exercise}</strong>
+                        <span className="exercise-summary-score">Score {itemPowerScore}</span>
+                        <button
+                          type="button"
+                          onClick={e => {
+                            e.stopPropagation();
+                            setOpenSummaryKey(openSummaryKey === summaryKey ? null : summaryKey);
+                          }}
+                          title="Ver detalle del último día"
+                          aria-label="Ver detalle del último día"
+                          aria-expanded={openSummaryKey === summaryKey}
+                          className="exercise-info-btn exercise-summary-info-btn"
+                        >
+                          ℹ️
+                        </button>
                       </div>
-                    )}
-                  </li>
-                ))}
+
+                      {openSummaryKey === summaryKey && Array.isArray(item._debugRows) && (
+                        <div className="exercise-detail-card" style={{
+                          border: "1px solid #e5e5e5",
+                          borderRadius: 8,
+                          padding: "6px 8px",
+                          margin: "6px 0 2px",
+                          background: "#fafafa",
+                        }}>
+                          <p className="exercise-summary-lastday">Último día: {lastDayLabel}</p>
+                          <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
+                            <thead>
+                              <tr>
+                                <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
+                                <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
+                                <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[...item._debugRows]
+                                .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
+                                .map((r, idx2) => (
+                                  <tr key={idx2}>
+                                    <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
+                                      {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                                    </td>
+                                    <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
+                                    <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
+                                  </tr>
+                                ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </details>
           ))}
         </div>
       </form>
-
-
-    </>
+    </div>
   );
 
 // ✅ NUEVO BLOQUE: limpiar parámetros de la URL después de usarlos
