@@ -1,20 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
+import { doc } from "firebase/firestore";
+import { httpsCallable } from "firebase/functions";
+import { Youtube } from "lucide-react";
+import { db, functions } from "../firebase/config";
+import { getDocWithFreshAuth } from "../firebase/firestoreRetry";
 import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  serverTimestamp,
-  setDoc,
-  where,
-} from "firebase/firestore";
-import { db } from "../firebase/config";
-import { isMarkedDeleted } from "../utils/isMarkedDeleted";
+  listUserExercises,
+  saveUserExercise,
+} from "../data/exerciseMaster";
+import {
+  TRACKING_MODES,
+  buildCanonicalKey,
+  exerciseMatchesCanonicalKey,
+  getCoveredCanonicalKeys,
+  normalizeText,
+  normalizeTrackingMode,
+} from "../utils/exerciseCatalog";
 
-const normalizeText = (value) => String(value || "").trim().replace(/\s+/g, " ");
-
-const sanitize = (value = "") =>
+const sanitizeLegacyKey = (value = "") =>
   String(value)
     .trim()
     .toLowerCase()
@@ -22,9 +25,12 @@ const sanitize = (value = "") =>
     .replace(/\s+/g, "_")
     .slice(0, 90);
 
-const docKeyFor = (muscleGroup, exercise) => `${sanitize(muscleGroup)}__${sanitize(exercise)}`;
+const legacyDocKeyFor = (muscleGroup, exercise) =>
+  `${sanitizeLegacyKey(muscleGroup)}__${sanitizeLegacyKey(exercise)}`;
 
 const emptyDraft = {
+  trackingMode: TRACKING_MODES.STRENGTH,
+  description: "",
   youtubeUrl: "",
   technique: "",
   mistakes: "",
@@ -73,7 +79,7 @@ const parseYoutube = (rawUrl) => {
 const explainFirestoreError = (err, fallback) => {
   const code = String(err?.code || "").toLowerCase();
   if (code.includes("permission-denied")) {
-    return "Permisos insuficientes para leer/guardar la ficha. Revisa reglas y sesión.";
+    return "Permisos insuficientes para leer o guardar la ficha.";
   }
   if (code.includes("unauthenticated")) {
     return "Tu sesión no es válida. Cierra sesión y vuelve a entrar.";
@@ -84,130 +90,178 @@ const explainFirestoreError = (err, fallback) => {
   return fallback;
 };
 
+const toDraftFromExercise = (exerciseOption = {}) => ({
+  trackingMode: normalizeTrackingMode(exerciseOption.trackingMode),
+  description: normalizeText(exerciseOption.description),
+  youtubeUrl: normalizeText(exerciseOption.youtubeUrl),
+  technique: normalizeText(exerciseOption.technique),
+  mistakes: normalizeText(exerciseOption.mistakes),
+  equipment: normalizeText(exerciseOption.equipment),
+  notes: normalizeText(exerciseOption.notes),
+});
+
 const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) => {
-  const [allPairs, setAllPairs] = useState([]);
+  const [allExercises, setAllExercises] = useState([]);
+  const [activeExerciseId, setActiveExerciseId] = useState("");
   const [muscleGroup, setMuscleGroup] = useState("");
   const [exercise, setExercise] = useState("");
   const [draft, setDraft] = useState(emptyDraft);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [aiFilling, setAiFilling] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    if (!user) return;
-    const loadPairs = async () => {
-      const qAll = query(collection(db, "workouts"), where("uid", "==", user.uid));
-      const snap = await getDocs(qAll);
-      const seen = new Set();
-      const pairs = [];
-
-      snap.docs.forEach((snapshotDoc) => {
-        const data = snapshotDoc.data();
-        if (isMarkedDeleted(data)) return;
-        const nextGroup = normalizeText(data.muscleGroup);
-        const nextExercise = normalizeText(data.exercise);
-        if (!nextGroup || !nextExercise) return;
-        const key = `${nextGroup}||${nextExercise}`;
-        if (seen.has(key)) return;
-        seen.add(key);
-        pairs.push({ muscleGroup: nextGroup, exercise: nextExercise });
-      });
-
-      pairs.sort((a, b) => {
-        const byGroup = a.muscleGroup.localeCompare(b.muscleGroup);
-        if (byGroup !== 0) return byGroup;
-        return a.exercise.localeCompare(b.exercise);
-      });
-      setAllPairs(pairs);
-    };
-
-    loadPairs().catch((loadErr) => {
-      console.error("Error cargando biblioteca:", loadErr);
-      setError("No se pudo cargar la biblioteca.");
-    });
-  }, [user]);
-
-  useEffect(() => {
-    if (!selectedExercise || typeof selectedExercise !== "object") return;
-    const nextGroup = normalizeText(selectedExercise.muscleGroup);
-    const nextExercise = normalizeText(selectedExercise.exercise);
-    if (!nextExercise) return;
-    setMuscleGroup(nextGroup);
-    setExercise(nextExercise);
-  }, [selectedExercise]);
+  const groupedPairs = useMemo(() => {
+    return Object.entries(
+      allExercises.reduce((acc, item) => {
+        const group = item.muscleGroup || "Sin grupo";
+        if (!acc[group]) acc[group] = [];
+        acc[group].push(item);
+        return acc;
+      }, {})
+    ).map(([group, entries]) => [
+      group,
+      entries.sort((left, right) => left.exercise.localeCompare(right.exercise, "es", { sensitivity: "base" })),
+    ]);
+  }, [allExercises]);
 
   const exerciseOptions = useMemo(() => {
     if (!muscleGroup) {
-      return [...new Set(allPairs.map((item) => item.exercise))].sort((a, b) => a.localeCompare(b));
+      return [...new Map(allExercises.map((item) => [item.exercise, item])).values()]
+        .map((item) => item.exercise)
+        .sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
     }
-    return allPairs
+    return allExercises
       .filter((item) => item.muscleGroup.toLowerCase() === muscleGroup.toLowerCase())
       .map((item) => item.exercise)
-      .sort((a, b) => a.localeCompare(b));
-  }, [allPairs, muscleGroup]);
+      .sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
+  }, [allExercises, muscleGroup]);
 
-  const activeKey = useMemo(() => {
-    const nextGroup = normalizeText(muscleGroup);
-    const nextExercise = normalizeText(exercise);
-    if (!nextGroup || !nextExercise) return "";
-    return docKeyFor(nextGroup, nextExercise);
-  }, [muscleGroup, exercise]);
+  const video = useMemo(() => parseYoutube(draft.youtubeUrl), [draft.youtubeUrl]);
+  const currentCanonicalKey = useMemo(
+    () => buildCanonicalKey(muscleGroup, exercise),
+    [muscleGroup, exercise]
+  );
+  const matchedExistingExercise = useMemo(() => {
+    if (!muscleGroup || !exercise) return null;
+    return allExercises.find((item) => exerciseMatchesCanonicalKey(item, currentCanonicalKey)) || null;
+  }, [allExercises, currentCanonicalKey, exercise, muscleGroup]);
 
-  useEffect(() => {
-    if (!user || !activeKey) {
+  const applySelection = async (nextSelection = {}, options = {}) => {
+    const nextGroup = normalizeText(nextSelection.muscleGroup);
+    const nextExercise = normalizeText(nextSelection.exercise);
+    const nextExerciseId = normalizeText(nextSelection.exerciseId);
+    const nextCanonicalKey = buildCanonicalKey(nextGroup, nextExercise);
+    const shouldNotify = options.notify !== false;
+
+    setMessage("");
+    setError("");
+    setMuscleGroup(nextGroup);
+    setExercise(nextExercise);
+    setActiveExerciseId(nextExerciseId);
+
+    if (!nextGroup || !nextExercise) {
       setDraft(emptyDraft);
+      if (shouldNotify) onSelectExercise?.(null);
       return;
     }
 
-    const loadRecord = async () => {
+    const fromMaster =
+      (nextExerciseId && allExercises.find((item) => item.exerciseId === nextExerciseId)) ||
+      allExercises.find(
+        (item) =>
+          item.exercise.toLowerCase() === nextExercise.toLowerCase() &&
+          item.muscleGroup.toLowerCase() === nextGroup.toLowerCase()
+      ) ||
+      allExercises.find(
+        (item) => item.exerciseId && exerciseMatchesCanonicalKey(item, nextCanonicalKey)
+      );
+
+    if (fromMaster?.exerciseId) {
+      setMuscleGroup(fromMaster.muscleGroup);
+      setExercise(fromMaster.exercise);
+      setDraft(toDraftFromExercise(fromMaster));
+      setActiveExerciseId(fromMaster.exerciseId);
+      if (shouldNotify) {
+        onSelectExercise?.({
+          exerciseId: fromMaster.exerciseId,
+          exercise: fromMaster.exercise,
+          muscleGroup: fromMaster.muscleGroup,
+          trackingMode: fromMaster.trackingMode,
+        });
+      }
+      return;
+    }
+
+    setDraft((prev) => ({
+      ...emptyDraft,
+      trackingMode: normalizeTrackingMode(nextSelection.trackingMode || prev.trackingMode),
+    }));
+
+    try {
+      const legacyRef = doc(db, "users", user.uid, "exerciseLibrary", legacyDocKeyFor(nextGroup, nextExercise));
+      const legacySnap = await getDocWithFreshAuth(legacyRef);
+      if (legacySnap.exists()) {
+        const legacy = legacySnap.data();
+        setDraft((prev) => ({
+          ...prev,
+          youtubeUrl: normalizeText(legacy.youtubeUrl),
+          technique: normalizeText(legacy.technique),
+          mistakes: normalizeText(legacy.mistakes),
+          equipment: normalizeText(legacy.equipment),
+          notes: normalizeText(legacy.notes),
+        }));
+      }
+    } catch (loadErr) {
+      console.error("Error cargando ficha legacy:", loadErr);
+    }
+
+    if (shouldNotify) {
+      onSelectExercise?.({
+        exerciseId: "",
+        exercise: nextExercise,
+        muscleGroup: nextGroup,
+        trackingMode: normalizeTrackingMode(nextSelection.trackingMode),
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!user) {
+      setAllExercises([]);
+      return;
+    }
+
+    const loadExercises = async () => {
       setLoading(true);
       setError("");
       try {
-        const ref = doc(db, "users", user.uid, "exerciseLibrary", activeKey);
-        const snap = await getDoc(ref);
-        if (!snap.exists()) {
-          setDraft(emptyDraft);
-          return;
-        }
-        const data = snap.data();
-        setDraft({
-          youtubeUrl: String(data.youtubeUrl || ""),
-          technique: String(data.technique || ""),
-          mistakes: String(data.mistakes || ""),
-          equipment: String(data.equipment || ""),
-          notes: String(data.notes || ""),
-        });
+        const items = await listUserExercises(db, user.uid);
+        setAllExercises(items);
       } catch (loadErr) {
-        console.error("Error cargando ficha:", loadErr);
-        setError(explainFirestoreError(loadErr, "No se pudo cargar la ficha del ejercicio."));
+        console.error("Error cargando maestro de ejercicios:", loadErr);
+        setError(explainFirestoreError(loadErr, "No se pudo cargar la biblioteca."));
       } finally {
         setLoading(false);
       }
     };
 
-    loadRecord();
-  }, [user, activeKey]);
+    loadExercises();
+  }, [user]);
 
   useEffect(() => {
-    const nextExercise = normalizeText(exercise);
-    const nextGroup = normalizeText(muscleGroup);
-    if (!nextExercise || !nextGroup) return;
-    onSelectExercise?.({ exercise: nextExercise, muscleGroup: nextGroup });
-  }, [exercise, muscleGroup, onSelectExercise]);
+    if (!selectedExercise || !allExercises.length) return;
+    applySelection(selectedExercise, { notify: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExercise, allExercises.length]);
 
-  const groupedPairs = useMemo(() => {
-    return Object.entries(
-      allPairs.reduce((acc, pair) => {
-        const group = pair.muscleGroup || "Sin grupo";
-        if (!acc[group]) acc[group] = [];
-        acc[group].push(pair.exercise);
-        return acc;
-      }, {})
-    ).map(([group, exercises]) => [group, [...new Set(exercises)].sort((a, b) => a.localeCompare(b))]);
-  }, [allPairs]);
-
-  const video = useMemo(() => parseYoutube(draft.youtubeUrl), [draft.youtubeUrl]);
+  useEffect(() => {
+    if (activeExerciseId) return;
+    if (!matchedExistingExercise?.exerciseId) return;
+    setActiveExerciseId(matchedExistingExercise.exerciseId);
+    setDraft(toDraftFromExercise(matchedExistingExercise));
+  }, [activeExerciseId, matchedExistingExercise]);
 
   const handleSave = async () => {
     const nextGroup = normalizeText(muscleGroup);
@@ -228,29 +282,126 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
         return;
       }
 
-      const payload = {
-        uid: user.uid,
-        muscleGroup: nextGroup,
+      const saved = await saveUserExercise(db, user.uid, activeExerciseId, {
         exercise: nextExercise,
+        muscleGroup: nextGroup,
+        trackingMode: draft.trackingMode,
+        description: draft.description,
         youtubeUrl: parsed.valid ? parsed.watchUrl : "",
-        technique: normalizeText(draft.technique),
-        mistakes: normalizeText(draft.mistakes),
-        equipment: normalizeText(draft.equipment),
-        notes: normalizeText(draft.notes),
-        updatedAt: serverTimestamp(),
-      };
+        technique: draft.technique,
+        mistakes: draft.mistakes,
+        equipment: draft.equipment,
+        notes: draft.notes,
+      });
 
-      const ref = doc(db, "users", user.uid, "exerciseLibrary", docKeyFor(nextGroup, nextExercise));
-      await setDoc(ref, payload, { merge: true });
+      setAllExercises((previous) => {
+        const coveredCanonicalKeys = new Set(getCoveredCanonicalKeys(saved));
+        const filtered = previous.filter((item) => {
+          if (item.exerciseId === saved.exerciseId) return false;
+          if (!item.exerciseId && coveredCanonicalKeys.has(item.canonicalKey)) return false;
+          return true;
+        });
+        return [...filtered, saved].sort((left, right) => {
+          const byGroup = left.muscleGroup.localeCompare(right.muscleGroup, "es", { sensitivity: "base" });
+          if (byGroup !== 0) return byGroup;
+          return left.exercise.localeCompare(right.exercise, "es", { sensitivity: "base" });
+        });
+      });
+      setActiveExerciseId(saved.exerciseId);
+      setMuscleGroup(saved.muscleGroup);
+      setExercise(saved.exercise);
+      setDraft(toDraftFromExercise(saved));
       setMessage("Ficha guardada correctamente.");
-      if (parsed.valid && payload.youtubeUrl !== draft.youtubeUrl) {
-        setDraft((prev) => ({ ...prev, youtubeUrl: payload.youtubeUrl }));
-      }
+      onSelectExercise?.({
+        exerciseId: saved.exerciseId,
+        exercise: saved.exercise,
+        muscleGroup: saved.muscleGroup,
+        trackingMode: saved.trackingMode,
+      });
     } catch (saveErr) {
       console.error("Error guardando ficha:", saveErr);
-      setError(explainFirestoreError(saveErr, "No se pudo guardar la ficha."));
+      setError(explainFirestoreError(saveErr, saveErr?.message || "No se pudo guardar la ficha."));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const clearGroupSelection = () => {
+    setMuscleGroup("");
+    setExercise("");
+    setActiveExerciseId("");
+    setDraft(emptyDraft);
+    setMessage("");
+    setError("");
+    onSelectExercise?.(null);
+  };
+
+  const clearExerciseSelection = () => {
+    setExercise("");
+    setActiveExerciseId("");
+    setDraft(emptyDraft);
+    setMessage("");
+    setError("");
+    onSelectExercise?.(null);
+  };
+
+  const handleFillWithAi = async () => {
+    const nextGroup = normalizeText(muscleGroup);
+    const nextExercise = normalizeText(exercise);
+    const parsed = parseYoutube(draft.youtubeUrl);
+
+    if (!nextGroup || !nextExercise) {
+      setError("Selecciona grupo y ejercicio antes de usar IA.");
+      return;
+    }
+    if (!parsed.valid) {
+      setError("Introduce un enlace de YouTube válido antes de usar IA.");
+      return;
+    }
+    setAiFilling(true);
+    setError("");
+    setMessage("");
+    try {
+      const callable = httpsCallable(functions, "analyzeExerciseYoutube");
+      const result = await callable({
+        youtubeUrl: parsed.watchUrl,
+        muscleGroup: nextGroup,
+        exercise: nextExercise,
+      });
+      const data = typeof result?.data === "object" && result?.data ? result.data : {};
+      setDraft((prev) => ({
+        ...prev,
+        youtubeUrl: parsed.watchUrl,
+        technique: normalizeText(data.technique || prev.technique),
+        mistakes: normalizeText(data.mistakes || prev.mistakes),
+        equipment: normalizeText(data.equipment || prev.equipment),
+        notes: normalizeText(data.notes || prev.notes),
+      }));
+      const rawCost = Number(data.costEur ?? data.estimatedCostEur);
+      if (Number.isFinite(rawCost) && rawCost >= 0) {
+        setMessage(`Sugerencias IA listas. Coste: ${rawCost.toFixed(2)} €.`);
+      } else {
+        setMessage("Sugerencias IA listas. Revisa y guarda la ficha.");
+      }
+    } catch (aiErr) {
+      console.error("Error recuperando datos con IA:", aiErr);
+      const code = String(aiErr?.code || "").toLowerCase();
+      const rawMessage = normalizeText(aiErr?.message);
+      if (code.includes("permission-denied") || code.includes("unauthenticated")) {
+        setError("La recuperación con IA está reservada al administrador.");
+      } else if (code.includes("resource-exhausted")) {
+        setError("Límite mensual de IA alcanzado. No se puede ejecutar más este mes.");
+      } else if (code.includes("not-found") || code.includes("unimplemented")) {
+        setError("El backend de IA aún no está desplegado.");
+      } else if (code.includes("internal")) {
+        setError(rawMessage || "Error interno en backend de IA.");
+      } else if (rawMessage) {
+        setError(`Error IA: ${rawMessage}`);
+      } else {
+        setError("No se pudo recuperar datos con IA. Intenta de nuevo.");
+      }
+    } finally {
+      setAiFilling(false);
     }
   };
 
@@ -260,38 +411,83 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
         <button className="library-back" onClick={onBack} type="button">← Volver</button>
         <div>
           <h2>Biblioteca de ejercicios</h2>
-          <p>Guarda técnica, vídeo y notas para cada grupo y ejercicio.</p>
+          <p>Edita la ficha maestra, el nombre visible y el modo de registro de cada ejercicio.</p>
         </div>
       </header>
 
       <section className="library-selectors">
+        <div className="library-selectors-actions">
+          <button
+            className="library-reset-btn"
+            onClick={clearGroupSelection}
+            type="button"
+            disabled={!muscleGroup && !exercise}
+          >
+            Limpiar selección
+          </button>
+        </div>
         <div>
           <label htmlFor="library-muscle-group">Grupo</label>
-          <input
-            id="library-muscle-group"
-            list="library-group-list"
-            value={muscleGroup}
-            onChange={(event) => {
-              setMuscleGroup(event.target.value);
-              setExercise("");
-            }}
-            placeholder="Ej: Espalda"
-          />
+          <div className="library-selector-input-row">
+            <input
+              id="library-muscle-group"
+              list="library-group-list"
+              value={muscleGroup}
+              onChange={(event) => {
+                setMuscleGroup(event.target.value);
+                setMessage("");
+                setError("");
+              }}
+              onBlur={(event) => setMuscleGroup(normalizeText(event.target.value))}
+              placeholder="Ej: Espalda"
+            />
+            {muscleGroup && (
+              <button
+                type="button"
+                className="library-clear-btn"
+                onClick={clearGroupSelection}
+                aria-label="Borrar grupo"
+                title="Borrar grupo"
+              >
+                ✕
+              </button>
+            )}
+          </div>
           <datalist id="library-group-list">
-            {[...new Set(allPairs.map((item) => item.muscleGroup))].sort((a, b) => a.localeCompare(b)).map((group) => (
-              <option key={group} value={group} />
-            ))}
+            {[...new Set(allExercises.map((item) => item.muscleGroup))]
+              .sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }))
+              .map((group) => (
+                <option key={group} value={group} />
+              ))}
           </datalist>
         </div>
         <div>
           <label htmlFor="library-exercise">Ejercicio</label>
-          <input
-            id="library-exercise"
-            list="library-exercise-list"
-            value={exercise}
-            onChange={(event) => setExercise(event.target.value)}
-            placeholder={muscleGroup ? "Ej: Remo sentado" : "Selecciona grupo primero"}
-          />
+          <div className="library-selector-input-row">
+            <input
+              id="library-exercise"
+              list="library-exercise-list"
+              value={exercise}
+              onChange={(event) => {
+                setExercise(event.target.value);
+                setMessage("");
+                setError("");
+              }}
+              onBlur={(event) => setExercise(normalizeText(event.target.value))}
+              placeholder={muscleGroup ? "Ej: Remo sentado" : "Selecciona grupo primero"}
+            />
+            {exercise && (
+              <button
+                type="button"
+                className="library-clear-btn"
+                onClick={clearExerciseSelection}
+                aria-label="Borrar ejercicio"
+                title="Borrar ejercicio"
+              >
+                ✕
+              </button>
+            )}
+          </div>
           <datalist id="library-exercise-list">
             {exerciseOptions.map((option) => (
               <option key={option} value={option} />
@@ -302,19 +498,62 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
 
       {message && <p className="library-message is-ok">{message}</p>}
       {error && <p className="library-message is-error">{error}</p>}
+      {loading && <p className="library-empty">Cargando biblioteca...</p>}
 
-      {!activeKey ? (
+      {!exercise || !muscleGroup ? (
         <p className="library-empty">Selecciona grupo y ejercicio para ver o crear su ficha.</p>
       ) : (
         <section className="library-card">
           <div className="library-card-head">
-            <h3>{normalizeText(muscleGroup)} · {normalizeText(exercise)}</h3>
+            <div>
+              <h3>{normalizeText(muscleGroup)} · {normalizeText(exercise)}</h3>
+              {activeExerciseId ? (
+                <p className="library-meta">Ficha maestra existente. Los cambios mantienen su identidad interna.</p>
+              ) : (
+                <p className="library-meta">Aún no existe ficha maestra. Guarda para crearla.</p>
+              )}
+            </div>
             <button className="library-save-btn" onClick={handleSave} type="button" disabled={saving || loading}>
-              {saving ? "Guardando..." : "Guardar ficha"}
+              {saving ? "Guardando..." : activeExerciseId ? "Guardar ficha" : "Crear ficha"}
             </button>
           </div>
 
           <div className="library-form-grid">
+            <div className="library-full">
+              <label className="library-switch-row" htmlFor="library-tracking-mode">
+                <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.STRENGTH ? " is-active" : ""}`}>Peso / reps</span>
+                <span className="tracking-mode-slider">
+                  <input
+                    id="library-tracking-mode"
+                    type="checkbox"
+                    checked={draft.trackingMode === TRACKING_MODES.ENDURANCE}
+                    onChange={(event) =>
+                      setDraft((prev) => ({
+                        ...prev,
+                        trackingMode: event.target.checked ? TRACKING_MODES.ENDURANCE : TRACKING_MODES.STRENGTH,
+                      }))
+                    }
+                  />
+                  <span className="tracking-mode-slider-ui" aria-hidden="true" />
+                </span>
+                <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.ENDURANCE ? " is-active" : ""}`}>Min / dist</span>
+              </label>
+              <p className="library-help-text">
+                {draft.trackingMode === TRACKING_MODES.ENDURANCE
+                  ? "Este ejercicio se registrará con minutos obligatorios y distancia opcional."
+                  : "Este ejercicio se registrará con peso y repeticiones."}
+              </p>
+            </div>
+            <div className="library-full">
+              <label htmlFor="library-description">Descripción</label>
+              <textarea
+                id="library-description"
+                value={draft.description}
+                onChange={(event) => setDraft((prev) => ({ ...prev, description: event.target.value }))}
+                placeholder="Qué representa este ejercicio para ti o cómo quieres usarlo"
+                rows={2}
+              />
+            </div>
             <div>
               <label htmlFor="library-youtube">YouTube</label>
               <input
@@ -324,6 +563,33 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
                 onChange={(event) => setDraft((prev) => ({ ...prev, youtubeUrl: event.target.value }))}
                 placeholder="https://www.youtube.com/watch?v=..."
               />
+              <div className="library-youtube-actions">
+                <button
+                  type="button"
+                  className="library-ai-btn"
+                  onClick={handleFillWithAi}
+                  disabled={aiFilling || loading || saving}
+                  title="Recuperar técnica y notas desde el vídeo"
+                >
+                  {aiFilling ? "Analizando..." : "Recuperar datos con IA"}
+                </button>
+              </div>
+              {video.valid && (
+                <div className="library-video">
+                  <div className="library-video-head">
+                    <strong>Vídeo</strong>
+                    <a href={video.watchUrl} target="_blank" rel="noreferrer">Abrir en YouTube</a>
+                  </div>
+                  <iframe
+                    title={`Video ${normalizeText(exercise)}`}
+                    src={video.embedUrl}
+                    loading="lazy"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                    allowFullScreen
+                  />
+                </div>
+              )}
             </div>
             <div>
               <label htmlFor="library-equipment">Material</label>
@@ -366,49 +632,47 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
               />
             </div>
           </div>
-
-          {video.valid && (
-            <div className="library-video">
-              <div className="library-video-head">
-                <strong>Vídeo</strong>
-                <a href={video.watchUrl} target="_blank" rel="noreferrer">Abrir en YouTube</a>
-              </div>
-              <iframe
-                title={`Video ${normalizeText(exercise)}`}
-                src={video.embedUrl}
-                loading="lazy"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerPolicy="strict-origin-when-cross-origin"
-                allowFullScreen
-              />
-            </div>
-          )}
         </section>
       )}
 
       <section className="library-list">
         <h3>Ejercicios disponibles</h3>
         {groupedPairs.length === 0 ? (
-          <p className="library-empty">No hay ejercicios en tu historial todavía.</p>
+          <p className="library-empty">No hay ejercicios todavía.</p>
         ) : (
-          groupedPairs.map(([group, exercises]) => (
+          groupedPairs.map(([group, entries]) => (
             <details key={group} className="library-group">
               <summary>{group}</summary>
               <ul>
-                {exercises.map((name) => (
-                  <li key={`${group}||${name}`}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setMuscleGroup(group === "Sin grupo" ? "" : group);
-                        setExercise(name);
-                        window.scrollTo({ top: 0, behavior: "smooth" });
-                      }}
-                    >
-                      {name}
-                    </button>
-                  </li>
-                ))}
+                {entries.map((item) => {
+                  const hasYoutube = Boolean(item.youtubeUrl);
+                  const isEndurance = item.trackingMode === TRACKING_MODES.ENDURANCE;
+                  return (
+                    <li key={`${group}||${item.exerciseId || item.exercise}`}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          applySelection(item);
+                          window.scrollTo({ top: 0, behavior: "smooth" });
+                        }}
+                      >
+                        <span className="library-exercise-name">{item.exercise}</span>
+                        <span className="library-inline-badges">
+                          {isEndurance && <span className="library-mode-badge">Tiempo</span>}
+                          {hasYoutube && (
+                            <span
+                              className="library-youtube-badge"
+                              title="Tiene enlace de YouTube"
+                              aria-label="Tiene enlace de YouTube"
+                            >
+                              <Youtube size={14} strokeWidth={2.3} />
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             </details>
           ))

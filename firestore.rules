@@ -13,6 +13,36 @@ service cloud.firestore {
       return isSignedIn() && request.auth.token.adminApp == true;
     }
 
+    function isStrengthWorkout(data) {
+      return (!("trackingModeSnapshot" in data) || data.trackingModeSnapshot == "strength")
+        && data.weight is number
+        && (!("reps" in data) || data.reps == null || data.reps is number)
+        && (!("durationMin" in data) || data.durationMin == null)
+        && (!("distanceKm" in data) || data.distanceKm == null);
+    }
+
+    function isEnduranceWorkout(data) {
+      return data.trackingModeSnapshot == "endurance"
+        && data.durationMin is number
+        && (!("distanceKm" in data) || data.distanceKm == null || data.distanceKm is number)
+        && (!("weight" in data) || data.weight == null)
+        && (!("reps" in data) || data.reps == null || data.reps is number);
+    }
+
+    function isValidWorkoutWrite(data) {
+      return data.uid is string
+        && data.exercise is string
+        && data.muscleGroup is string
+        && data.timestamp is timestamp
+        && (!("exerciseId" in data) || data.exerciseId == null || data.exerciseId is string)
+        && (!("exerciseNameSnapshot" in data) || data.exerciseNameSnapshot == null || data.exerciseNameSnapshot is string)
+        && (!("muscleGroupSnapshot" in data) || data.muscleGroupSnapshot == null || data.muscleGroupSnapshot is string)
+        && (!("trackingMode" in data) || data.trackingMode == null || data.trackingMode is string)
+        && (!("delete" in data) || data.delete is bool)
+        && (!("deletedAt" in data) || data.deletedAt == null || data.deletedAt is timestamp)
+        && (isStrengthWorkout(data) || isEnduranceWorkout(data));
+    }
+
     // =========================
     // Colección: workouts
     // =========================
@@ -23,15 +53,12 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
                     && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.exercise is string
-                    && request.resource.data.muscleGroup is string
-                    && request.resource.data.weight is number
-                    && (!('reps' in request.resource.data) || request.resource.data.reps is number)
-                    && request.resource.data.timestamp is timestamp;
+                    && isValidWorkoutWrite(request.resource.data);
 
       allow update, delete: if isSignedIn()
                             && resource.data.uid == request.auth.uid
-                            && request.resource.data.uid == resource.data.uid;
+                            && request.resource.data.uid == resource.data.uid
+                            && isValidWorkoutWrite(request.resource.data);
     }
 
     // =========================
@@ -51,13 +78,8 @@ service cloud.firestore {
                             && resource.data.uid == uid
                             && request.resource.data.uid == uid;
 
-      // Subcolección: exerciseMaster
-      match /exerciseMaster/{docId} {
-        allow read, write: if isAdminApp() || (isSignedIn() && request.auth.uid == uid);
-      }
-
-      // Subcolección: exerciseLibrary
-      match /exerciseLibrary/{docId} {
+      // Subcolecciones del usuario
+      match /{document=**} {
         allow read, write: if isAdminApp() || (isSignedIn() && request.auth.uid == uid);
       }
     }

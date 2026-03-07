@@ -1,17 +1,20 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { onAuthStateChanged, signOut, getRedirectResult } from "firebase/auth";
+import { onIdTokenChanged, signOut, getRedirectResult } from "firebase/auth";
 import { auth } from "./firebase/config";
+import { LOGIN_REDIRECT_FLAG } from "./utils/loginRedirectState";
 
 jest.mock("firebase/auth", () => ({
-  onAuthStateChanged: jest.fn(),
+  onIdTokenChanged: jest.fn(),
   signOut: jest.fn(),
   getRedirectResult: jest.fn(),
 }));
 
 jest.mock("./firebase/config", () => ({
   auth: { _mock: "auth" },
+  environmentLabel: "PRODUCCION",
+  isLocalTestMode: false,
 }));
 
 jest.mock("./components/Login", () => function LoginMock() {
@@ -30,6 +33,10 @@ jest.mock("./components/HistoryViewer", () => function HistoryViewerMock() {
   return <div>HistoryViewer Mock</div>;
 });
 
+jest.mock("./components/KpiViewer", () => function KpiViewerMock() {
+  return <div>KpiViewer Mock</div>;
+});
+
 jest.mock("./components/PlanDay", () => function PlanDayMock() {
   return <div>PlanDay Mock</div>;
 });
@@ -39,7 +46,7 @@ jest.mock("./components/DangerZone", () => function DangerZoneMock() {
 });
 
 const setupAuth = (user) => {
-  onAuthStateChanged.mockImplementation((_firebaseAuth, callback) => {
+  onIdTokenChanged.mockImplementation((_firebaseAuth, callback) => {
     callback(user);
     return () => {};
   });
@@ -61,7 +68,7 @@ describe("App", () => {
   });
 
   test("muestra la vista principal para usuario autenticado", async () => {
-    setupAuth({ uid: "u1", displayName: "Jesus" });
+    setupAuth({ uid: "u1", displayName: "Jesus", getIdTokenResult: jest.fn().mockResolvedValue({ claims: {} }) });
 
     render(<App />);
 
@@ -71,7 +78,7 @@ describe("App", () => {
   });
 
   test("permite cambiar entre vistas desde navegación", async () => {
-    setupAuth({ uid: "u1", displayName: "Jesus" });
+    setupAuth({ uid: "u1", displayName: "Jesus", getIdTokenResult: jest.fn().mockResolvedValue({ claims: {} }) });
 
     render(<App />);
     await screen.findByText("ExerciseForm Mock");
@@ -82,17 +89,42 @@ describe("App", () => {
     await userEvent.click(screen.getByRole("button", { name: /Diario/i }));
     expect(screen.getByText("HistoryViewer Mock")).toBeInTheDocument();
 
+    await userEvent.click(screen.getByRole("button", { name: /KPIs/i }));
+    expect(screen.getByText("KpiViewer Mock")).toBeInTheDocument();
+
     await userEvent.click(screen.getByRole("button", { name: /Registro/i }));
     expect(screen.getByText("ExerciseForm Mock")).toBeInTheDocument();
   });
 
   test("cierra sesión al pulsar el botón", async () => {
-    setupAuth({ uid: "u1", displayName: "Jesus" });
+    setupAuth({ uid: "u1", displayName: "Jesus", getIdTokenResult: jest.fn().mockResolvedValue({ claims: {} }) });
 
     render(<App />);
     await screen.findByText("ExerciseForm Mock");
 
     await userEvent.click(screen.getByRole("button", { name: /Cerrar sesión/i }));
     expect(signOut).toHaveBeenCalledWith(auth);
+  });
+
+  test("mantiene la carga mientras procesa un redirect reciente y limpia el flag", async () => {
+    let authCallback;
+    onIdTokenChanged.mockImplementation((_firebaseAuth, callback) => {
+      authCallback = callback;
+      return () => {};
+    });
+    localStorage.setItem(LOGIN_REDIRECT_FLAG, JSON.stringify({ ts: Date.now() }));
+
+    render(<App />);
+
+    expect(screen.getByText("Cargando…")).toBeInTheDocument();
+    expect(getRedirectResult).toHaveBeenCalledWith(auth);
+
+    await act(async () => {
+      authCallback({ uid: "u1", displayName: "Jesus", getIdTokenResult: jest.fn().mockResolvedValue({ claims: {} }) });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("ExerciseForm Mock")).toBeInTheDocument();
+    expect(localStorage.getItem(LOGIN_REDIRECT_FLAG)).toBeNull();
   });
 });

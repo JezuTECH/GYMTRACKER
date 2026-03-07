@@ -3,14 +3,23 @@ import { useEffect, useState } from "react";
 import {
   signInWithPopup,
   signInWithRedirect,
-  getRedirectResult,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
   setPersistence,
   browserLocalPersistence,
 } from "firebase/auth";
-import { auth, googleProvider } from "../firebase/config";
+import { auth, googleProvider, isLocalTestMode } from "../firebase/config";
+import {
+  clearLoginRedirectFlag,
+  setLoginRedirectFlag,
+} from "../utils/loginRedirectState";
 
 const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
 const isIOS = /iPad|iPhone|iPod/i.test(ua);
+const LOCAL_TEST_EMAIL =
+  process.env.REACT_APP_LOCAL_TEST_LOGIN_EMAIL || "jesusrodriguezsanchez@gmail.com";
+const LOCAL_TEST_PASSWORD =
+  process.env.REACT_APP_LOCAL_TEST_LOGIN_PASSWORD || "gym-tracker-test";
 
 // Detección simple de PWA/standalone (suficiente para la mayoría de casos)
 function inStandaloneMode() {
@@ -24,34 +33,10 @@ function inStandaloneMode() {
 }
 const isStandalone = inStandaloneMode();
 
-const LOGIN_FLAG = "gymtracker_login_in_progress";
-const LOGIN_FLAG_TTL_MS = 5 * 60 * 1000;
-
-function setLoginFlag() {
-  try {
-    localStorage.setItem(LOGIN_FLAG, JSON.stringify({ ts: Date.now() }));
-  } catch {}
-}
-function clearLoginFlag() {
-  try {
-    localStorage.removeItem(LOGIN_FLAG);
-  } catch {}
-}
-function readLoginFlagAge() {
-  try {
-    const v = JSON.parse(localStorage.getItem(LOGIN_FLAG));
-    if (!v || !v.ts) return Infinity;
-    return Date.now() - Number(v.ts || 0);
-  } catch {
-    return Infinity;
-  }
-}
-
-export default function Login() {
+export default function Login({ redirectError = "" }) {
   const [status, setStatus] = useState("Esperando…");
   const [lastError, setLastError] = useState("");
 
-  // En mount: forzar persistencia y procesar redirect si iniciamos uno
   useEffect(() => {
     (async () => {
       try {
@@ -59,49 +44,56 @@ export default function Login() {
       } catch (e) {
         console.warn("[Login] setPersistence warning:", e);
       }
-
-      // Sólo procesar getRedirectResult si lanzamos un redirect recientemente
-      const age = readLoginFlagAge();
-      if (age < LOGIN_FLAG_TTL_MS) {
-        setStatus("Procesando retorno de Google...");
-        try {
-          const res = await getRedirectResult(auth);
-          if (res?.user) {
-            setStatus("Sesión iniciada (redirect)");
-          } else {
-            setStatus("Esperando acción del usuario...");
-          }
-        } catch (err) {
-          console.warn("[Login] getRedirectResult:", err?.message || err);
-          setLastError(err?.message || String(err));
-        } finally {
-          clearLoginFlag();
-        }
-      } else {
-        clearLoginFlag();
-      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!redirectError) return;
+    setStatus("No se pudo completar el inicio de sesión.");
+    setLastError(redirectError);
+  }, [redirectError]);
 
   const doRedirectLogin = async () => {
     try {
       setStatus("Redirigiendo a Google...");
       setLastError("");
-      setLoginFlag();
+      setLoginRedirectFlag();
       await signInWithRedirect(auth, googleProvider);
       // no llega aquí: redirect
     } catch (err) {
       console.error("[Login] signInWithRedirect error:", err);
       setStatus("Error al redirigir");
       setLastError(err?.message || String(err));
-      clearLoginFlag();
+      clearLoginRedirectFlag();
     }
   };
 
   const handleLogin = async () => {
     setStatus("Iniciando sesión…");
     setLastError("");
+
+    if (isLocalTestMode) {
+      try {
+        try {
+          await signInWithEmailAndPassword(auth, LOCAL_TEST_EMAIL, LOCAL_TEST_PASSWORD);
+        } catch (signInErr) {
+          const code = String(signInErr?.code || "").toLowerCase();
+          if (code.includes("user-not-found") || code.includes("invalid-credential")) {
+            await createUserWithEmailAndPassword(auth, LOCAL_TEST_EMAIL, LOCAL_TEST_PASSWORD);
+          } else {
+            throw signInErr;
+          }
+        }
+        setStatus("Sesión de prueba iniciada");
+        clearLoginRedirectFlag();
+      } catch (anonymousErr) {
+        console.error("[Login] local test sign-in error:", anonymousErr);
+        setStatus("Error al iniciar sesión de prueba");
+        setLastError(anonymousErr?.message || String(anonymousErr));
+      }
+      return;
+    }
 
     // En iOS PWA (standalone) NO usar popup automático: mostrar instrucción
     if (isIOS && isStandalone) {
@@ -113,7 +105,7 @@ export default function Login() {
     try {
       await signInWithPopup(auth, googleProvider);
       setStatus("Sesión iniciada con popup");
-      clearLoginFlag();
+      clearLoginRedirectFlag();
       return;
     } catch (popupErr) {
       console.warn("[Login] signInWithPopup falló, fallback a redirect:", popupErr?.message || popupErr);
@@ -123,7 +115,7 @@ export default function Login() {
         console.error("[Login] fallback redirect falló:", redirectErr);
         setStatus("Error al iniciar sesión");
         setLastError(redirectErr?.message || String(redirectErr));
-        clearLoginFlag();
+        clearLoginRedirectFlag();
       }
     }
   };
@@ -131,9 +123,14 @@ export default function Login() {
   // Función para abrir explicitamente en Safari (útil en PWA)
   const openInSafari = () => {
     try {
-      window.open(window.location.href, "_blank");
+      const nextWindow = window.open(window.location.href, "_blank", "noopener,noreferrer");
+      if (nextWindow) {
+        nextWindow.opener = null;
+        return;
+      }
+      window.location.assign(window.location.href);
     } catch {
-      window.location.reload();
+      window.location.assign(window.location.href);
     }
   };
 
@@ -142,6 +139,12 @@ export default function Login() {
       <h2>
         Inicia sesión en <strong>Gym Tracker</strong>
       </h2>
+
+      {isLocalTestMode && (
+        <p className="login-copy">
+          Estás en modo de prueba local. Esta sesión usa emuladores, no mezcla datos con producción y entra con un usuario de test con correo.
+        </p>
+      )}
 
       {isIOS && isStandalone ? (
         <>
@@ -158,19 +161,25 @@ export default function Login() {
       ) : (
         <>
           <button className="login-main-btn" onClick={handleLogin}>
-            Continuar con Google
+            {isLocalTestMode ? "Entrar en modo test" : "Continuar con Google"}
           </button>
 
           <p className="login-status">{status}</p>
           {lastError && <p className="login-error">Detalle: {lastError}</p>}
 
-          <div className="login-help">
-            <p>Si al volver de Google sigues en esta pantalla, prueba:</p>
-            <ul>
-              <li>Permitir ventanas emergentes (popups).</li>
-              <li>Usar Safari si estás en iOS PWA.</li>
-            </ul>
-          </div>
+          {isLocalTestMode ? (
+            <p className="login-note">
+              Usa este acceso para validar flujos, regresión visual y migraciones sin tocar tu base real. Correo test: {LOCAL_TEST_EMAIL}
+            </p>
+          ) : (
+            <div className="login-help">
+              <p>Si al volver de Google sigues en esta pantalla, prueba:</p>
+              <ul>
+                <li>Permitir ventanas emergentes (popups).</li>
+                <li>Usar Safari si estás en iOS PWA.</li>
+              </ul>
+            </div>
+          )}
         </>
       )}
     </div>

@@ -1,18 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../firebase/config";
+import { listUserExercises } from "../data/exerciseMaster";
 import {
   doc,
-  getDoc,
-  setDoc,
-  deleteDoc,
   serverTimestamp,
   collection,
   query,
   where,
-  getDocs,
   Timestamp,
 } from "firebase/firestore";
-import { isMarkedDeleted } from "../utils/isMarkedDeleted";
+import {
+  deleteDocWithFreshAuth,
+  getDocWithFreshAuth,
+  getDocsWithFreshAuth,
+  setDocWithFreshAuth,
+} from "../firebase/firestoreRetry";
+import { buildCanonicalKey, normalizeText } from "../utils/exerciseCatalog";
 import "./PlanDay.css";
 
 const emptyRoutine = () => ({ muscleGroup: "", exercise: "", series: "" });
@@ -47,6 +50,8 @@ const normalizeRoutine = (routine) => ({
   muscleGroup: String(routine?.muscleGroup || ""),
   exercise: String(routine?.exercise || ""),
   series: String(routine?.series || ""),
+  exerciseId: String(routine?.exerciseId || ""),
+  trackingModeSnapshot: String(routine?.trackingModeSnapshot || ""),
 });
 
 const formatPlanDate = (value) => {
@@ -88,34 +93,18 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
       setError("");
 
       try {
-        const workoutsQuery = query(collection(db, "workouts"), where("uid", "==", user.uid));
         const todayRef = doc(db, "plans", todayDocId);
         const plansQuery = query(collection(db, "plans"), where("uid", "==", user.uid));
 
-        const [workoutsSnap, todaySnap, plansSnap] = await Promise.all([
-          getDocs(workoutsQuery),
-          getDoc(todayRef),
-          getDocs(plansQuery),
+        const [exerciseOptions, todaySnap, plansSnap] = await Promise.all([
+          listUserExercises(db, user.uid),
+          getDocWithFreshAuth(todayRef),
+          getDocsWithFreshAuth(plansQuery),
         ]);
 
         if (cancelled) return;
 
-        const seen = new Set();
-        const pairs = [];
-        workoutsSnap.forEach((snapshotDoc) => {
-          const data = snapshotDoc.data();
-          if (isMarkedDeleted(data)) return;
-          const muscleGroup = String(data.muscleGroup || "").trim();
-          const exercise = String(data.exercise || "").trim();
-          if (!muscleGroup || !exercise) return;
-
-          const key = `${muscleGroup}||${exercise}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            pairs.push({ muscleGroup, exercise });
-          }
-        });
-        setAllExercises(pairs);
+        setAllExercises(exerciseOptions);
 
         const loadedPlans = plansSnap.docs
           .map((snapshotDoc) => ({ id: snapshotDoc.id, ...snapshotDoc.data() }))
@@ -307,11 +296,20 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
       const targetDocId = planDocId(user.uid, saveDateKey);
 
       const clean = routines
-        .map((routine) => ({
-          muscleGroup: routine.muscleGroup.trim(),
-          exercise: routine.exercise.trim(),
-          series: routine.series.trim(),
-        }))
+        .map((routine) => {
+          const muscleGroup = normalizeText(routine.muscleGroup);
+          const exercise = normalizeText(routine.exercise);
+          const matchedExercise = allExercises.find(
+            (item) => buildCanonicalKey(item.muscleGroup, item.exercise) === buildCanonicalKey(muscleGroup, exercise)
+          );
+          return {
+            muscleGroup,
+            exercise,
+            series: routine.series.trim(),
+            exerciseId: matchedExercise?.exerciseId || "",
+            trackingModeSnapshot: matchedExercise?.trackingMode || "",
+          };
+        })
         .filter((routine) => routine.muscleGroup && routine.exercise && routine.series);
 
       if (clean.length === 0) {
@@ -327,7 +325,7 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
         updatedAt: serverTimestamp(),
       };
 
-      await setDoc(doc(db, "plans", targetDocId), payload);
+      await setDocWithFreshAuth(doc(db, "plans", targetDocId), payload);
 
       const newPlan = { ...payload, id: targetDocId };
       if (targetDocId === todayDocId) {
@@ -363,7 +361,7 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
     setError("");
 
     try {
-      await deleteDoc(doc(db, "plans", activePlan.id));
+      await deleteDocWithFreshAuth(doc(db, "plans", activePlan.id));
 
       const remainingPlans = plans
         .filter((plan) => plan.id !== activePlan.id)
@@ -389,9 +387,9 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
     }
   };
 
-  const handleRegisterFromPlan = (exercise, muscleGroup) => {
-    const nextExercise = String(exercise || "").trim();
-    const nextGroup = String(muscleGroup || "").trim();
+  const handleRegisterFromPlan = (routine) => {
+    const nextExercise = String(routine?.exercise || "").trim();
+    const nextGroup = String(routine?.muscleGroup || "").trim();
     if (!nextExercise || !nextGroup) return;
 
     const params = new URLSearchParams();
@@ -400,7 +398,12 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
     window.history.pushState({}, "", `/?${params.toString()}`);
 
     if (typeof onPickExercise === "function") {
-      onPickExercise({ exercise: nextExercise, muscleGroup: nextGroup });
+      onPickExercise({
+        exerciseId: normalizeText(routine?.exerciseId),
+        exercise: nextExercise,
+        muscleGroup: nextGroup,
+        trackingMode: routine?.trackingModeSnapshot || "",
+      });
       return;
     }
 
@@ -639,7 +642,7 @@ const PlanDay = ({ user, onBack, onPickExercise }) => {
                         <tr
                           key={`active-routine-${index}`}
                           className="plan-row-clickable"
-                          onClick={() => handleRegisterFromPlan(routine.exercise, routine.muscleGroup)}
+                          onClick={() => handleRegisterFromPlan(routine)}
                         >
                           <td data-label="Grupo muscular">{routine.muscleGroup}</td>
                           <td data-label="Ejercicio">{routine.exercise}</td>

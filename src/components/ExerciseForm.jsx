@@ -1,24 +1,33 @@
-// src/components/ExerciseForm.jsx
-import { useState, useEffect, useRef, useMemo } from "react";
-import { calculateWeightedAverage, calculateAverageReps } from "../utils/calculateAverages";
-import { isMarkedDeleted } from "../utils/isMarkedDeleted";
-// import CalcInfoModal from "./CalcInfoModal";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
-  addDoc,
-  getDocs,
+  doc,
+  orderBy,
   query,
   where,
-  orderBy,
-  limit,
 } from "firebase/firestore";
 import { db, auth } from "../firebase/config";
-
-// [2025-08-25] Motivo: evitar duplicados por espacios finales o múltiples espacios internos
-// [2025-08-27] Motivo: ocultar sugerencias de ejercicios cuando no hay grupo; mantener escritura libre.
-const normalizeText = (str) => (str ?? "")
-  .trim()
-  .replace(/\s+/g, " ");
+import {
+  addDocWithFreshAuth,
+  getDocsWithFreshAuth,
+  updateDocWithFreshAuth,
+} from "../firebase/firestoreRetry";
+import { listUserExercises, ensureUserExercise, getUserExerciseById } from "../data/exerciseMaster";
+import {
+  TRACKING_MODES,
+  buildCanonicalKey,
+  normalizeText,
+  normalizeTrackingMode,
+} from "../utils/exerciseCatalog";
+import {
+  buildWorkoutSnapshot,
+  formatDistanceKm,
+  formatDurationMin,
+  formatPace,
+  getEnduranceMetrics,
+  getStrengthMetrics,
+} from "../utils/workoutMetrics";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 
 const triggerHaptic = (pattern = 10) => {
   if (typeof navigator === "undefined") return;
@@ -26,6 +35,156 @@ const triggerHaptic = (pattern = 10) => {
   navigator.vibrate(pattern);
 };
 
+const toJsDate = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+  if (typeof value.seconds === "number") return new Date(value.seconds * 1000);
+  return null;
+};
+
+const toDateKey = (date) => {
+  const value = date instanceof Date ? date : new Date(date);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+};
+
+const formatDateLabel = (value) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  const weekday = date.toLocaleDateString("es-ES", { weekday: "long" });
+  return `${date.toLocaleDateString("es-ES")} (${weekday})`;
+};
+
+const formatHeadlineDate = (value) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  return date.toLocaleDateString("es-ES");
+};
+
+const groupRowsByDay = (rows = []) => {
+  const grouped = new Map();
+  rows.forEach((row) => {
+    const timestamp = toJsDate(row.timestamp);
+    if (!timestamp) return;
+    const key = toDateKey(timestamp);
+    if (!grouped.has(key)) {
+      grouped.set(key, { key, date: timestamp, rows: [] });
+    }
+    grouped.get(key).rows.push({ ...row, timestamp });
+    if (timestamp > grouped.get(key).date) {
+      grouped.get(key).date = timestamp;
+    }
+  });
+  return Array.from(grouped.values()).sort((left, right) => right.date - left.date);
+};
+
+const mapWorkoutDoc = (snapshotDoc) => {
+  const data = snapshotDoc.data();
+  const timestamp = toJsDate(data.timestamp);
+  return {
+    id: snapshotDoc.id,
+    uid: data.uid,
+    exerciseId: normalizeText(data.exerciseId),
+    exercise: normalizeText(data.exercise || data.exerciseNameSnapshot),
+    muscleGroup: normalizeText(data.muscleGroup || data.muscleGroupSnapshot),
+    trackingMode: data.trackingModeSnapshot === TRACKING_MODES.ENDURANCE
+      ? TRACKING_MODES.ENDURANCE
+      : TRACKING_MODES.STRENGTH,
+    weight: typeof data.weight === "number" ? data.weight : null,
+    reps: typeof data.reps === "number" ? data.reps : null,
+    durationMin: typeof data.durationMin === "number" ? data.durationMin : null,
+    distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : null,
+    timestamp,
+    deleted: isMarkedDeleted(data),
+  };
+};
+
+const buildRowKey = (row = {}) =>
+  normalizeText(row.exerciseId) || buildCanonicalKey(row.muscleGroup, row.exercise);
+
+const matchesExerciseOption = (row = {}, exerciseOption = {}) => {
+  const optionId = normalizeText(exerciseOption.exerciseId);
+  if (optionId && normalizeText(row.exerciseId) === optionId) {
+    return true;
+  }
+  return buildCanonicalKey(row.muscleGroup, row.exercise) === buildCanonicalKey(
+    exerciseOption.muscleGroup,
+    exerciseOption.exercise
+  );
+};
+
+const sortRowsByTimestamp = (rows = []) =>
+  [...rows].sort((left, right) => (left.timestamp?.getTime?.() || 0) - (right.timestamp?.getTime?.() || 0));
+
+const sortRowsByTimestampDesc = (rows = []) =>
+  [...rows].sort((left, right) => (right.timestamp?.getTime?.() || 0) - (left.timestamp?.getTime?.() || 0));
+
+const isMissingIndexError = (error) => {
+  const code = String(error?.code || "").toLowerCase();
+  return code === "failed-precondition" || code === "firestore/failed-precondition";
+};
+
+const explainLoadError = (error, fallback) => {
+  const code = String(error?.code || "").toLowerCase();
+  if (code.includes("permission-denied")) return `${fallback} (permisos)`;
+  if (code.includes("unauthenticated")) return `${fallback} (sesión)`;
+  if (code.includes("unavailable")) return `${fallback} (sin conexión a Firestore)`;
+  if (code.includes("failed-precondition")) return `${fallback} (índice o configuración)`;
+  const message = normalizeText(error?.message);
+  return message ? `${fallback} (${message})` : fallback;
+};
+
+const summarizeSession = (rows = [], trackingMode = TRACKING_MODES.STRENGTH) => {
+  if (trackingMode === TRACKING_MODES.ENDURANCE) {
+    const metrics = getEnduranceMetrics(rows);
+    const titleParts = [formatDurationMin(metrics.totalDurationMin)];
+    if (metrics.totalDistanceKm != null) {
+      titleParts.push(formatDistanceKm(metrics.totalDistanceKm));
+    }
+    const detailParts = [];
+    if (metrics.averageSpeedKmh != null) {
+      detailParts.push(`Vel.Media: ${metrics.averageSpeedKmh} km/h`);
+    }
+    if (metrics.paceMinPerKm != null) {
+      detailParts.push(`Ritmo: ${formatPace(metrics.paceMinPerKm)}`);
+    }
+    return {
+      title: titleParts.filter(Boolean).join(" · "),
+      badge: metrics.totalDistanceKm != null ? formatDistanceKm(metrics.totalDistanceKm) : formatDurationMin(metrics.totalDurationMin),
+      compactLine: metrics.totalDistanceKm != null ? formatDurationMin(metrics.totalDurationMin) : "",
+      detailLine: detailParts.join(" · "),
+    };
+  }
+
+  const metrics = getStrengthMetrics(rows);
+  const compactLine = `${metrics.averageWeight ?? "-"} kg · ${metrics.averageReps ?? "-"} reps`;
+  return {
+    title: `PowerScore ${metrics.powerScore} · ${compactLine}`,
+    badge: `Score ${metrics.powerScore}`,
+    compactLine,
+    detailLine: "",
+  };
+};
+
+const buildSummaryItems = (exerciseOptions = [], workoutRows = []) =>
+  exerciseOptions.map((item) => {
+    const relatedRows = workoutRows.filter((row) => matchesExerciseOption(row, item));
+    const groupedSessions = groupRowsByDay(relatedRows);
+    const latestSession = groupedSessions[0] || null;
+    const summary = summarizeSession(latestSession?.rows || [], item.trackingMode);
+    return {
+      ...item,
+      summaryKey: normalizeText(item.exerciseId) || item.canonicalKey,
+      groupedSessions,
+      latestSession,
+      latestRows: latestSession ? sortRowsByTimestamp(latestSession.rows) : [],
+      latestDate: latestSession?.date || null,
+      latestTitle: latestSession ? summary.title : "Sin registros",
+      latestBadge: latestSession ? summary.badge : "Sin datos",
+      latestCompactLine: latestSession ? summary.compactLine : "Sin actividad",
+      latestDetailLine: latestSession ? summary.detailLine : "",
+    };
+  });
 
 const ExerciseForm = ({
   user,
@@ -35,588 +194,589 @@ const ExerciseForm = ({
   onSelectExercise,
 }) => {
   const [exerciseName, setExerciseName] = useState("");
-
-// ✅ NUEVO BLOQUE: capturar parámetros de la URL al cargar
-useEffect(() => {
-  const params = new URLSearchParams(window.location.search);
-  const ex = params.get("exercise");
-  const mg = params.get("muscleGroup");
-// if (ex) setExerciseName(ex);
-// if (mg) setMuscleGroup(mg);
-  if (ex) setExerciseName(normalizeText(ex));
-  if (mg) setMuscleGroup(normalizeText(mg));
-}, []);
-
-// ✅ Mover aquí el de limpieza
-useEffect(() => {
-  const params = new URLSearchParams(window.location.search);
-  if (params.has("exercise") || params.has("muscleGroup")) {
-    window.history.replaceState({}, "", window.location.pathname);
-  }
-}, []);
-
   const [muscleGroup, setMuscleGroup] = useState("");
+  const [draftTrackingMode, setDraftTrackingMode] = useState(TRACKING_MODES.STRENGTH);
+  const [weight, setWeight] = useState("");
+  const [reps, setReps] = useState("");
+  const [durationMin, setDurationMin] = useState("");
+  const [distanceKm, setDistanceKm] = useState("");
+  const [saveStatus, setSaveStatus] = useState(null);
+  const [error, setError] = useState("");
   const [allExercises, setAllExercises] = useState([]);
-
-  // === Sugerencias para exerciseName (texto libre) ===
+  const [allWorkouts, setAllWorkouts] = useState([]);
+  const [editingRowId, setEditingRowId] = useState("");
+  const [editingDraft, setEditingDraft] = useState({ weight: "", reps: "", durationMin: "", distanceKm: "" });
   const [openSug, setOpenSug] = useState(false);
-  const sugBoxRef = useRef(null);
-
-  // === Sugerencias para muscleGroup (texto libre) ===
   const [openGroupSug, setOpenGroupSug] = useState(false);
+  const [openInline, setOpenInline] = useState(null);
+  const [openSummaryKey, setOpenSummaryKey] = useState(null);
+  const [weightSuggestions, setWeightSuggestions] = useState([]);
+  const sugBoxRef = useRef(null);
   const groupSugRef = useRef(null);
-  const [groupSuggestions, setGroupSuggestions] = useState([]);
-
   const muscleGroupInputRef = useRef(null);
   const exerciseInputRef = useRef(null);
 
-  const [weight, setWeight] = useState("");
-  const [reps, setReps] = useState("");
-  const [weightSuggestions, setWeightSuggestions] = useState([]);
+  const loadWorkoutSnapshot = useCallback(async () => {
+    const workoutsCollection = collection(db, "workouts");
+    try {
+      return await getDocsWithFreshAuth(
+        query(workoutsCollection, where("uid", "==", user.uid), orderBy("timestamp", "desc"))
+      );
+    } catch (queryErr) {
+      if (!isMissingIndexError(queryErr)) throw queryErr;
+      return getDocsWithFreshAuth(query(workoutsCollection, where("uid", "==", user.uid)));
+    }
+  }, [user]);
 
-  const [suggestions, setSuggestions] = useState([]);
-  const filteredSuggestions = useMemo(() => {
-    const mgClean = normalizeText(muscleGroup);
-    if (!mgClean) return []; // sin grupo ⇒ no sugerencias
-    const q = (exerciseName || "").toLowerCase().trim();
-    if (!q) return suggestions.slice(0, 20);
-    return suggestions
-      .filter((n) => (n || "").toLowerCase().includes(q))
-      .slice(0, 20);
-  }, [exerciseName, suggestions, muscleGroup]);
-useEffect(() => {
-    function handleOutside(e) {
-      const t = e.target;
-      if (sugBoxRef.current && !sugBoxRef.current.contains(t)) setOpenSug(false);
-      if (groupSugRef.current && !groupSugRef.current.contains(t)) setOpenGroupSug(false);
+  const reloadUserData = useCallback(async ({ silent = false } = {}) => {
+    if (!user) return;
+    const [exerciseResult, workoutResult] = await Promise.allSettled([
+      listUserExercises(db, user.uid),
+      loadWorkoutSnapshot(),
+    ]);
+
+    const nextExercises =
+      exerciseResult.status === "fulfilled" ? exerciseResult.value : [];
+    const nextWorkouts =
+      workoutResult.status === "fulfilled"
+        ? sortRowsByTimestampDesc(
+            workoutResult.value.docs
+              .map(mapWorkoutDoc)
+              .filter((row) => !row.deleted)
+          )
+        : [];
+
+    setAllExercises(nextExercises);
+    setAllWorkouts(nextWorkouts);
+
+    if (exerciseResult.status === "rejected") {
+      console.error("Error cargando maestro de ejercicios:", exerciseResult.reason);
+    }
+    if (workoutResult.status === "rejected") {
+      console.error("Error cargando historial de registro:", workoutResult.reason);
+    }
+
+    if (exerciseResult.status === "rejected" && workoutResult.status === "rejected") {
+      if (silent) return;
+      throw exerciseResult.reason || workoutResult.reason;
+    }
+    if (exerciseResult.status === "rejected") {
+      if (!silent) {
+        setError("No se pudo cargar el maestro de ejercicios.");
+      }
+      return;
+    }
+    if (workoutResult.status === "rejected") {
+      if (!silent) {
+        setError("No se pudo cargar el historial reciente.");
+      }
+      return;
+    }
+    if (!silent) {
+      setError("");
+    }
+  }, [loadWorkoutSnapshot, user]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const nextExercise = params.get("exercise");
+    const nextGroup = params.get("muscleGroup");
+    if (nextExercise) setExerciseName(normalizeText(nextExercise));
+    if (nextGroup) setMuscleGroup(normalizeText(nextGroup));
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has("exercise") || params.has("muscleGroup")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
+
+  useEffect(() => {
+    function handleOutside(event) {
+      const target = event.target;
+      if (sugBoxRef.current && !sugBoxRef.current.contains(target)) setOpenSug(false);
+      if (groupSugRef.current && !groupSugRef.current.contains(target)) setOpenGroupSug(false);
     }
     document.addEventListener("mousedown", handleOutside);
     return () => document.removeEventListener("mousedown", handleOutside);
   }, []);
-  const [lastWeight, setLastWeight] = useState(null);
-  const [lastReps, setLastReps] = useState(null);
-  const [lastTimestamp, setLastTimestamp] = useState(null);
-  const [saveStatus, setSaveStatus] = useState(null);
-  const [summaryData, setSummaryData] = useState([]);
-  const [openInline, setOpenInline] = useState(null); // 'last' | 'prev' | null
-  const [openSummaryKey, setOpenSummaryKey] = useState(null); // acordeón en Resumen
-  const [infoItem, setInfoItem] = useState(null);
-  const [headerInfo, setHeaderInfo] = useState(null);
-  const [prevHeaderInfo, setPrevHeaderInfo] = useState(null);
 
   useEffect(() => {
-    const exercise = normalizeText(exerciseName);
-    const muscle = normalizeText(muscleGroup);
-    if (!exercise || !muscle) {
-      onSelectExercise?.(null);
+    if (!user) {
+      setAllExercises([]);
+      setAllWorkouts([]);
       return;
     }
-    onSelectExercise?.({ exercise, muscleGroup: muscle });
-  }, [exerciseName, muscleGroup, onSelectExercise]);
+    reloadUserData().catch((loadErr) => {
+      console.error("Error cargando datos de registro:", loadErr);
+      setError(explainLoadError(loadErr, "No se pudo cargar el registro."));
+    });
+  }, [user, reloadUserData]);
 
   useEffect(() => {
-    if (!selectedExercise || typeof selectedExercise !== "object") return;
+    if (!selectedExercise) return;
     const nextExercise = normalizeText(selectedExercise.exercise);
     const nextGroup = normalizeText(selectedExercise.muscleGroup);
-    if (!nextExercise) return;
-
-    setExerciseName((previous) =>
-      normalizeText(previous) === nextExercise ? previous : nextExercise
-    );
-    setMuscleGroup((previous) =>
-      normalizeText(previous) === nextGroup ? previous : nextGroup
-    );
+    if (!nextExercise || !nextGroup) return;
+    setExerciseName(nextExercise);
+    setMuscleGroup(nextGroup);
   }, [selectedExercise]);
 
-  useEffect(() => {
-    if (!user) return;
-    const fetchExercises = async () => {
-      const q = query(collection(db, "workouts"), where("uid", "==", user.uid));
-      const snapshot = await getDocs(q);
-
-      const all = snapshot.docs
-        .map((doc) => doc.data())
-        .filter((data) => !isMarkedDeleted(data))
-        .map((data) => ({
-          exercise: data.exercise,
-          muscleGroup: data.muscleGroup || "",
-        }));
-      setAllExercises(all);
-
-      setSuggestions([]); // [2025-08-27] Sin grupo, ocultamos sugerencias
-setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].sort());
-      fetchSummary(all);
+  const currentCanonicalKey = useMemo(
+    () => buildCanonicalKey(muscleGroup, exerciseName),
+    [muscleGroup, exerciseName]
+  );
+  const selectedCanonicalKey = useMemo(
+    () => buildCanonicalKey(selectedExercise?.muscleGroup, selectedExercise?.exercise),
+    [selectedExercise]
+  );
+  const selectedExerciseOption = useMemo(() => {
+    const exerciseId = normalizeText(selectedExercise?.exerciseId);
+    const exercise = normalizeText(selectedExercise?.exercise);
+    const nextGroup = normalizeText(selectedExercise?.muscleGroup);
+    if (!exerciseId || !exercise || !nextGroup) return null;
+    return {
+      exerciseId,
+      exercise,
+      muscleGroup: nextGroup,
+      trackingMode: normalizeTrackingMode(selectedExercise?.trackingMode),
+      canonicalKey: buildCanonicalKey(nextGroup, exercise),
     };
-    fetchExercises();
-  }, [user]);
+  }, [selectedExercise]);
 
-  // Helper: PowerScore de un conjunto de series (filas)
-  const calcPowerFromRows = (rows) => {
-    if (!Array.isArray(rows) || rows.length === 0) return 0;
-    const totalWR = rows.reduce((s, r) => s + ((Number(r.weight) || 0) * (Number(r.reps) || 0)), 0);
-    const totalReps = rows.reduce((s, r) => s + (Number(r.reps) || 0), 0);
-    const avgWeight = totalReps > 0 ? totalWR / totalReps : 0;
-    return Math.round(avgWeight * totalReps);
-  };
+  const matchedExercise = useMemo(() => {
+    if (selectedExerciseOption && currentCanonicalKey === selectedCanonicalKey) {
+      const byId = allExercises.find((item) => item.exerciseId === selectedExerciseOption.exerciseId);
+      if (byId) return byId;
+      return selectedExerciseOption;
+    }
+    return allExercises.find(
+      (item) => buildCanonicalKey(item.muscleGroup, item.exercise) === currentCanonicalKey
+    ) || null;
+  }, [allExercises, currentCanonicalKey, selectedCanonicalKey, selectedExerciseOption]);
 
-  // Helper: recompute latest-day stats for current selection
-  const recomputeLastForSelection = async () => {
-    if (!exerciseName || !muscleGroup || !user) {
-      setLastWeight(null);
-      setLastReps(null);
-      setLastTimestamp(null);
-      setHeaderInfo(null);
-      setPrevHeaderInfo(null);
+  const trackingMode = matchedExercise?.trackingMode || draftTrackingMode;
+
+  useEffect(() => {
+    if (matchedExercise) {
+      setDraftTrackingMode(matchedExercise.trackingMode);
+    }
+  }, [matchedExercise]);
+
+  useEffect(() => {
+    if (matchedExercise) return;
+    if (normalizeText(exerciseName) || normalizeText(muscleGroup)) return;
+    setDraftTrackingMode(TRACKING_MODES.STRENGTH);
+  }, [exerciseName, matchedExercise, muscleGroup]);
+
+  const groupSuggestions = useMemo(
+    () => [...new Set(allExercises.map((item) => item.muscleGroup).filter(Boolean))],
+    [allExercises]
+  );
+
+  const filteredGroupSuggestions = useMemo(() => {
+    const queryText = muscleGroup.toLowerCase().trim();
+    if (!queryText) return groupSuggestions.slice(0, 20);
+    return groupSuggestions.filter((group) => group.toLowerCase().includes(queryText)).slice(0, 20);
+  }, [groupSuggestions, muscleGroup]);
+
+  const exerciseSuggestions = useMemo(() => {
+    const base = muscleGroup
+      ? allExercises.filter((item) => item.muscleGroup.toLowerCase() === muscleGroup.toLowerCase())
+      : [];
+    const names = [...new Set(base.map((item) => item.exercise))];
+    const queryText = exerciseName.toLowerCase().trim();
+    if (!queryText) return names.slice(0, 20);
+    return names.filter((name) => name.toLowerCase().includes(queryText)).slice(0, 20);
+  }, [allExercises, exerciseName, muscleGroup]);
+
+  const currentRows = useMemo(() => {
+    if (!exerciseName || !muscleGroup) return [];
+    return allWorkouts.filter((row) => {
+      if (matchedExercise?.exerciseId) {
+        return matchesExerciseOption(row, matchedExercise);
+      }
+      return buildRowKey(row) === currentCanonicalKey;
+    });
+  }, [allWorkouts, currentCanonicalKey, exerciseName, matchedExercise, muscleGroup]);
+
+  const groupedCurrentSessions = useMemo(() => groupRowsByDay(currentRows), [currentRows]);
+  const latestSession = groupedCurrentSessions[0] || null;
+  const previousSession = groupedCurrentSessions[1] || null;
+
+  const summaryData = useMemo(() => buildSummaryItems(allExercises, allWorkouts), [allExercises, allWorkouts]);
+  const groupedSummaryData = useMemo(
+    () =>
+      Object.entries(
+        summaryData.reduce((acc, item) => {
+          const group = item.muscleGroup || "Sin grupo";
+          if (!acc[group]) acc[group] = [];
+          acc[group].push(item);
+          return acc;
+        }, {})
+      ),
+    [summaryData]
+  );
+  const editingRow = useMemo(
+    () => allWorkouts.find((row) => row.id === editingRowId) || null,
+    [allWorkouts, editingRowId]
+  );
+
+  useEffect(() => {
+    if (trackingMode !== TRACKING_MODES.STRENGTH) {
       setWeightSuggestions([]);
       return;
     }
-
-    const qSel = query(
-      collection(db, "workouts"),
-      where("uid", "==", user.uid),
-      where("exercise", "==", exerciseName),
-      where("muscleGroup", "==", muscleGroup),
-      orderBy("timestamp", "desc"),
-      limit(150)
-    );
-    const snapshot = await getDocs(qSel);
-    if (snapshot.empty) {
-      setLastWeight(null);
-      setLastReps(null);
-      setLastTimestamp(null);
-      setHeaderInfo(null);
-      setPrevHeaderInfo(null);
-      setWeightSuggestions([]);
-      return;
-    }
-
-    const toJsDate = (t) =>
-      t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
-    const pad2 = (n) => String(n).padStart(2, "0");
-    const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-
-    const docsRaw = snapshot.docs.map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }));
-    const docs = docsRaw.filter((d) => !isMarkedDeleted(d)); // incluye sin campo y con false
-
-    // Agrupar por día y ordenar descendente
-    const byDay = new Map();
-    for (const d of docs) {
-      const dt = toJsDate(d.timestamp);
-      if (!dt) continue;
-      const key = keyForDay(dt);
-      if (!byDay.has(key)) byDay.set(key, { date: dt, rows: [] });
-      byDay.get(key).rows.push(d);
-      // conservar la fecha más reciente para ese key
-      if (!byDay.get(key).date || dt > byDay.get(key).date) byDay.get(key).date = dt;
-    }
-    const dayEntries = Array.from(byDay.entries())
-      .sort((a, b) => b[1].date - a[1].date); // desc
-
-    const recentDayWeights = dayEntries
+    const recentAverages = groupedCurrentSessions
       .slice(0, 3)
-      .map(([, entry]) => calculateWeightedAverage(entry.rows))
-      .filter((value) => typeof value === "number" && Number.isFinite(value))
-      .map((value) => Number(value.toFixed(1)));
-
-    const nextSuggestions = [...new Set(recentDayWeights)];
+      .map((session) => getStrengthMetrics(session.rows).averageWeight)
+      .filter((value) => typeof value === "number");
+    const nextSuggestions = [...new Set(recentAverages)];
     if (nextSuggestions.length > 1) {
-      const avgRecent = Number(
+      const average = Number(
         (nextSuggestions.reduce((sum, value) => sum + value, 0) / nextSuggestions.length).toFixed(1)
       );
-      if (!nextSuggestions.includes(avgRecent)) {
-        nextSuggestions.push(avgRecent);
-      }
+      if (!nextSuggestions.includes(average)) nextSuggestions.push(average);
     }
     setWeightSuggestions(nextSuggestions);
+  }, [groupedCurrentSessions, trackingMode]);
 
-    const latestEntry = dayEntries[0];
-    const prevEntry   = dayEntries[1]; // puede ser undefined
-
-    const docsOfDay = latestEntry ? latestEntry[1].rows : [];
-
-    // Calcular PowerScore del último día y el mejor previo (para saber si es récord)
-    const latestPower = calcPowerFromRows(docsOfDay);
-    const previousBestPower = (() => {
-      const others = dayEntries.slice(1).map(([, entry]) => calcPowerFromRows(entry.rows));
-      return others.length ? Math.max(...others) : 0;
-    })();
-    const isPR = latestPower > previousBestPower && latestPower > 0;
-
-    if (!docsOfDay.length) {
-      setLastWeight(null);
-      setLastReps(null);
-      setLastTimestamp(null);
-      setHeaderInfo(null);
-      setPrevHeaderInfo(null);
-      return;
-    }
-
-    // Usar funciones utilitarias para calcular el promedio ponderado y reps medias
-    const calcWeight = calculateWeightedAverage(docsOfDay);
-    const repsAvg = calculateAverageReps(docsOfDay);
-
-    setLastWeight(calcWeight ?? null);
-    setLastReps(repsAvg ?? null);
-    setLastTimestamp(latestEntry && latestEntry[1].date ? latestEntry[1].date.toLocaleString() : null);
-
-    const debugRowsHeader = docsOfDay.map((d) => {
-      const t = d.timestamp?.toDate ? d.timestamp.toDate() : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
-      return {
-        weight: typeof d.weight === "number" ? d.weight : null,
-        reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
-        timestamp: t
-      };
-    });
-    setHeaderInfo({
-      exercise: exerciseName,
-      muscleGroup,
-      weight: calcWeight ?? "-",
-      reps: repsAvg ?? "-",
-      _lastDay: latestEntry && latestEntry[1].date ? latestEntry[1].date : null,
-      _calcWeight: calcWeight ?? null,
-      _repsAvg: repsAvg ?? null,
-      _debugRows: debugRowsHeader,
-      _powerScore: latestPower,
-      _prevBestPower: previousBestPower,
-      _isPR: isPR,
-    });
-
-    // Penúltimo día (si existe)
-    if (prevEntry && Array.isArray(prevEntry[1].rows) && prevEntry[1].rows.length > 0) {
-      const prevRows = prevEntry[1].rows;
-      const prevCalcWeight = calculateWeightedAverage(prevRows);
-      const prevRepsAvg = calculateAverageReps(prevRows);
-      const debugRowsPrev = prevRows.map((d) => {
-        const t = d.timestamp?.toDate ? d.timestamp.toDate() : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
-        return {
-          weight: typeof d.weight === "number" ? d.weight : null,
-          reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
-          timestamp: t
-        };
-      });
-      setPrevHeaderInfo({
-        exercise: exerciseName,
-        muscleGroup,
-        weight: prevCalcWeight ?? "-",
-        reps: prevRepsAvg ?? "-",
-        _lastDay: prevEntry[1].date || null,
-        _calcWeight: prevCalcWeight ?? null,
-        _repsAvg: prevRepsAvg ?? null,
-        _debugRows: debugRowsPrev
-      });
-    } else {
-      setPrevHeaderInfo(null);
-    }
+  const resetEntryFields = () => {
+    setWeight("");
+    setReps("");
+    setDurationMin("");
+    setDistanceKm("");
   };
 
-  useEffect(() => {
-    if (!exerciseName || !user) {
-      setLastWeight(null);
-      setLastReps(null);
-      setLastTimestamp(null);
-      setHeaderInfo(null);
-      setPrevHeaderInfo(null);
-      setOpenInline(null);
-      setWeightSuggestions([]);
-      return;
-    }
-    recomputeLastForSelection();
-  }, [exerciseName, muscleGroup, user]);
+  const commitSelection = useCallback((entry = null) => {
+    const nextExercise = normalizeText(entry?.exercise || exerciseName);
+    const nextGroup = normalizeText(entry?.muscleGroup || muscleGroup);
+    if (!nextExercise || !nextGroup) return null;
+    const payload = {
+      exerciseId: normalizeText(entry?.exerciseId || matchedExercise?.exerciseId),
+      exercise: nextExercise,
+      muscleGroup: nextGroup,
+      trackingMode: entry?.trackingMode || matchedExercise?.trackingMode || draftTrackingMode,
+    };
+    onSelectExercise?.(payload);
+    return payload;
+  }, [draftTrackingMode, exerciseName, matchedExercise, muscleGroup, onSelectExercise]);
 
-  const fetchSummary = async (exerciseList) => {
-    // pares únicos (grupo + ejercicio)
-    const uniquePairs = [];
-    const seen = new Set();
-    exerciseList.forEach((ex) => {
-      const key = `${ex.muscleGroup}||${ex.exercise}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        uniquePairs.push(ex);
-      }
-    });
+  const applyExerciseSelection = useCallback((entry) => {
+    if (!entry) return;
+    setExerciseName(entry.exercise);
+    setMuscleGroup(entry.muscleGroup);
+    setDraftTrackingMode(entry.trackingMode || TRACKING_MODES.STRENGTH);
+    setSaveStatus(null);
+    setError("");
+    setOpenInline(null);
+    setOpenSummaryKey(null);
+    setOpenSug(false);
+    setOpenGroupSug(false);
+    commitSelection(entry);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [commitSelection]);
 
-    const summaries = await Promise.all(
-      uniquePairs.map(async (ex) => {
-        // Buscar los últimos 50 registros para ese ejercicio/grupo
-        const qPair = query(
-          collection(db, "workouts"),
-          where("uid", "==", user.uid),
-          where("exercise", "==", ex.exercise),
-          where("muscleGroup", "==", ex.muscleGroup),
-          orderBy("timestamp", "desc"),
-          limit(50)
-        );
-        const snapshot = await getDocs(qPair);
-        if (!snapshot.empty) {
-          // Helpers
-          const toJsDate = (t) =>
-            t?.toDate ? t.toDate() : (t?.seconds ? new Date(t.seconds * 1000) : null);
-          const pad2 = (n) => String(n).padStart(2, "0");
-          const keyForDay = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-
-          const docs = snapshot.docs
-            .map((doc) => ({ ...doc.data(), timestamp: doc.data().timestamp }))
-            .filter((data) => !isMarkedDeleted(data));
-
-          // Latest day
-          let latestKey = null;
-          let latestDate = null;
-          for (const d of docs) {
-            const dt = toJsDate(d.timestamp);
-            if (!dt) continue;
-            const key = keyForDay(dt);
-            if (!latestDate || dt > latestDate) {
-              latestDate = dt;
-              latestKey = key;
-            }
-          }
-
-          // Docs of that latest day
-          const docsOfDay = docs.filter((d) => {
-            const dt = toJsDate(d.timestamp);
-            return dt && keyForDay(dt) === latestKey;
-          });
-          const debugRows = docsOfDay.map((d) => ({
-            weight: typeof d.weight === "number" ? d.weight : null,
-            reps: (typeof d.reps === "number" && d.reps > 0) ? d.reps : 10,
-            timestamp: toJsDate(d.timestamp)
-          }));
-
-          if (docsOfDay.length > 0) {
-            let wrSum = 0;
-            let repsSum = 0;
-            let repsSumForAvg = 0;
-            let count = 0;
-
-            docsOfDay.forEach((d) => {
-              const w = typeof d.weight === "number" ? d.weight : 0;
-              const r = typeof d.reps === "number" && d.reps > 0 ? d.reps : 10; // default 10
-              wrSum += w * r;
-              repsSum += r;
-              repsSumForAvg += r;
-              count += 1;
-            });
-
-            const calcWeight = repsSum > 0 ? Number((wrSum / repsSum).toFixed(1)) : "-";
-            const repsAvg = count > 0 ? Math.round(repsSumForAvg / count) : "-";
-            const powerScore = calcPowerFromRows(debugRows);
-
-            return {
-              exercise: ex.exercise,
-              muscleGroup: docsOfDay[0].muscleGroup || ex.muscleGroup || "",
-              weight: calcWeight,
-              reps: repsAvg,
-              _powerScore: powerScore,
-              _lastDay: latestDate,
-              _calcWeight: calcWeight,
-              _repsAvg: repsAvg,
-              _debugRows: debugRows,
-            };
-          } else {
-            return {
-              exercise: ex.exercise,
-              muscleGroup: ex.muscleGroup || "",
-              weight: "-",
-              reps: "-",
-              _powerScore: 0,
-              _lastDay: null,
-              _calcWeight: null,
-              _repsAvg: null,
-              _debugRows: [],
-            };
-          }
-        } else {
-          return {
-            exercise: ex.exercise,
-            muscleGroup: ex.muscleGroup || "",
-            weight: "-",
-            reps: "-",
-            _powerScore: 0,
-            _lastDay: null,
-            _calcWeight: null,
-            _repsAvg: null,
-            _debugRows: [],
-          };
-        }
-      })
-    );
-
-    summaries.sort((a, b) => {
-      const ga = (a.muscleGroup || "").toLowerCase();
-      const gb = (b.muscleGroup || "").toLowerCase();
-      if (ga !== gb) return ga.localeCompare(gb);
-      return a.exercise.toLowerCase().localeCompare(b.exercise.toLowerCase());
-    });
-
-    setSummaryData(summaries);
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    triggerHaptic(10);
-//  if (!exerciseName || !weight) return;
-    // Normalizar textos para evitar duplicados por espacios
+  const saveWorkout = async () => {
     const cleanExercise = normalizeText(exerciseName);
     const cleanGroup = normalizeText(muscleGroup);
-    if (!cleanExercise || !weight) return;
- 
-    // reps opcional, validar si viene
-    let repsNum = null;
-    if (reps !== "") {
-      const r = parseInt(reps, 10);
-      if (Number.isNaN(r) || r < 1 || r > 999) {
-        alert("Repeticiones debe ser un número entre 1 y 999");
-        return;
-      }
-      repsNum = r;
-    }
-
-    // Cambio por incidencia android
-    const uid = user?.uid || auth.currentUser?.uid;
-    if (!uid) {
-      alert("No hay sesión activa. Vuelve a iniciar sesión y prueba de nuevo.");
+    if (!cleanExercise || !cleanGroup) {
+      setError("Debes indicar grupo y ejercicio.");
       return;
     }
-    // cambio por incidencia android
 
-    try {
-      await addDoc(collection(db, "workouts"), {
-//       exercise: exerciseName,
-//      muscleGroup,
+    let effectiveExercise = matchedExercise;
+    if (!effectiveExercise && selectedExerciseOption && currentCanonicalKey === selectedCanonicalKey) {
+      effectiveExercise = await getUserExerciseById(db, user.uid, selectedExerciseOption.exerciseId);
+    }
+    if (!effectiveExercise) {
+      effectiveExercise = await ensureUserExercise(db, user.uid, {
         exercise: cleanExercise,
         muscleGroup: cleanGroup,
-        weight: parseFloat(weight),
-        reps: repsNum,
-        timestamp: new Date(),
-        delete: false, // ← alinear con consultas que excluyen borrados
-        uid,
-        userName: user?.displayName || auth.currentUser?.displayName || "Sin nombre",
-        email: user?.email || auth.currentUser?.email || null,
+        trackingMode,
       });
+      setAllExercises((previous) => {
+        const filtered = previous.filter((item) => buildRowKey(item) !== buildRowKey(effectiveExercise));
+        return [...filtered, effectiveExercise].sort((left, right) => left.muscleGroup.localeCompare(right.muscleGroup) || left.exercise.localeCompare(right.exercise));
+      });
+    }
 
-      // refrescar sugerencias / resumen
-//    if (!suggestions.includes(exerciseName) && muscleGroup) {
-      if (!suggestions.includes(cleanExercise) && cleanGroup) {
-        const filtered = allExercises
-//       .filter((ex) => ex.muscleGroup === muscleGroup)
-//          .map((ex) => ex.exercise);
-//        const updated = [...new Set([...filtered, exerciseName])].sort();
-          .filter((ex) => normalizeText(ex.muscleGroup) === cleanGroup)
-          .map((ex) => normalizeText(ex.exercise));
-        const updated = [...new Set([...filtered, cleanExercise])].sort();
-        setSuggestions(updated);
+    const uid = user?.uid || auth.currentUser?.uid;
+    if (!uid) {
+      setError("No hay sesión activa. Vuelve a iniciar sesión y prueba de nuevo.");
+      return;
+    }
+
+    const snapshot = buildWorkoutSnapshot({
+      exerciseId: effectiveExercise.exerciseId,
+      exercise: effectiveExercise.exercise,
+      muscleGroup: effectiveExercise.muscleGroup,
+      trackingMode: effectiveExercise.trackingMode,
+      weight,
+      reps,
+      durationMin,
+      distanceKm,
+    });
+
+    if (effectiveExercise.trackingMode === TRACKING_MODES.STRENGTH) {
+      if (snapshot.weight == null || snapshot.weight < 0) {
+        setError("El peso es obligatorio para ejercicios de fuerza.");
+        return;
       }
-//    const updatedAll = [...allExercises, { exercise: exerciseName, muscleGroup }];
-      const updatedAll = [...allExercises, { exercise: cleanExercise, muscleGroup: cleanGroup }];
-      setAllExercises(updatedAll);
-//    setGroupSuggestions([...new Set(updatedAll.map((d) => d.muscleGroup).filter(Boolean))].sort());
-      setGroupSuggestions([...new Set(updatedAll.map((d) => normalizeText(d.muscleGroup)).filter(Boolean))].sort());
-      setExerciseName(cleanExercise);
-      setMuscleGroup(cleanGroup);
-      fetchSummary(updatedAll);
+      if (snapshot.reps != null && (snapshot.reps < 1 || snapshot.reps > 999)) {
+        setError("Las repeticiones deben estar entre 1 y 999.");
+        return;
+      }
+    } else {
+      if (snapshot.durationMin == null || snapshot.durationMin <= 0) {
+        setError("Los minutos son obligatorios para ejercicios de resistencia.");
+        return;
+      }
+      if (snapshot.distanceKm != null && snapshot.distanceKm < 0) {
+        setError("La distancia no puede ser negativa.");
+        return;
+      }
+    }
 
-      // limpiar lo justo: mantener grupo y ejercicio para facilitar series consecutivas
-      setWeight("");
-      setReps("");
-      setSaveStatus("ok");
-      window.navigator.vibrate?.(150);
+    await addDocWithFreshAuth(collection(db, "workouts"), {
+      exerciseId: effectiveExercise.exerciseId,
+      exercise: effectiveExercise.exercise,
+      exerciseNameSnapshot: effectiveExercise.exercise,
+      muscleGroup: effectiveExercise.muscleGroup,
+      muscleGroupSnapshot: effectiveExercise.muscleGroup,
+      trackingMode: effectiveExercise.trackingMode,
+      trackingModeSnapshot: effectiveExercise.trackingMode,
+      weight: snapshot.weight,
+      reps: snapshot.reps,
+      durationMin: snapshot.durationMin,
+      distanceKm: snapshot.distanceKm,
+      timestamp: new Date(),
+      delete: false,
+      uid,
+      userName: user?.displayName || auth.currentUser?.displayName || "Sin nombre",
+      email: user?.email || auth.currentUser?.email || null,
+    });
 
-      // Recalcular resumen de cabecera (último día) para la selección actual
-      await recomputeLastForSelection();
-    } catch (err) {
-      console.error("Error al guardar:", err);
+    resetEntryFields();
+    setSaveStatus("ok");
+    setError("");
+    commitSelection(effectiveExercise);
+    triggerHaptic(150);
+    await reloadUserData();
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    triggerHaptic(10);
+    try {
+      await saveWorkout();
+    } catch (saveErr) {
+      console.error("Error al guardar registro:", saveErr);
       setSaveStatus("nok");
-      window.navigator.vibrate?.([100, 50, 100]);
+      setError(saveErr?.message || "No se pudo guardar el registro.");
     }
   };
 
-  // Limpieza completa al pulsar ✕ en grupo muscular (NO toca BBDD)
   const handleClearMuscleGroup = () => {
     setOpenGroupSug(false);
     setMuscleGroup("");
     setExerciseName("");
-    setWeight("");
-    setReps("");
-    setLastWeight(null);
-    setLastReps(null);
-    setLastTimestamp(null);
-    setHeaderInfo(null);
-    setPrevHeaderInfo(null);
+    resetEntryFields();
+    setSaveStatus(null);
+    setError("");
+    setEditingRowId("");
     setOpenInline(null);
-    setWeightSuggestions([]);
+    setOpenSummaryKey(null);
     onSelectExercise?.(null);
-    setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
     requestAnimationFrame(() => muscleGroupInputRef.current?.focus());
   };
-  // Memo para sugerencias filtradas de grupo
-  const filteredGroupSuggestions = useMemo(() => {
-    const q = (muscleGroup || "").toLowerCase().trim();
-    if (!q) return groupSuggestions.slice(0, 20);
-    return groupSuggestions.filter(g => (g || "").toLowerCase().includes(q)).slice(0, 20);
-  }, [muscleGroup, groupSuggestions]);
 
-  // Mantener sugerencias de ejercicios en sync con muscleGroup
-  useEffect(() => {
-//  if (!muscleGroup) {
-//     setSuggestions([...new Set(allExercises.map((d) => d.exercise))].sort());
-//     return; }
-// const filtered = allExercises
-//    .filter((ex) => ex.muscleGroup === muscleGroup)
-//    .map((ex) => ex.exercise);
-    const mgClean = normalizeText(muscleGroup);
-    if (!mgClean) {
-      setSuggestions([...new Set(allExercises.map((d) => normalizeText(d.exercise)))].sort());
-      return;
-    }
-    const filtered = allExercises
-      .filter((ex) => normalizeText(ex.muscleGroup) === mgClean)
-      .map((ex) => normalizeText(ex.exercise));
-    setSuggestions([...new Set(filtered)].sort());
-  }, [muscleGroup, allExercises]);
-
-  // Limpia solo el ejercicio (mantiene grupo)
   const handleClearExercise = () => {
     setExerciseName("");
-    setLastWeight(null);
-    setLastReps(null);
-    setLastTimestamp(null);
-    setHeaderInfo(null);
-    setPrevHeaderInfo(null);
+    resetEntryFields();
+    setSaveStatus(null);
+    setError("");
+    setEditingRowId("");
     setOpenInline(null);
-    setWeightSuggestions([]);
+    setOpenSummaryKey(null);
     onSelectExercise?.(null);
     requestAnimationFrame(() => exerciseInputRef.current?.focus());
   };
 
-  const adjustWeight = (delta) => {
-    setWeight((prev) => {
-      if (prev === "" && delta < 0) return "";
-      const base = prev === "" ? 0 : parseFloat(prev);
-      const safeBase = Number.isFinite(base) ? base : 0;
-      const next = Math.max(0, safeBase + delta);
-      return String(next);
+  const startEditingRow = (row) => {
+    setEditingRowId(row.id);
+    setEditingDraft({
+      weight: row.weight ?? "",
+      reps: row.reps ?? "",
+      durationMin: row.durationMin ?? "",
+      distanceKm: row.distanceKm ?? "",
     });
   };
 
-  const adjustReps = (delta) => {
-    setReps((prev) => {
-      if (prev === "" && delta < 0) return "";
-      const base = prev === "" ? 0 : parseInt(prev, 10);
-      const safeBase = Number.isFinite(base) ? base : 0;
-      const next = Math.min(999, Math.max(1, safeBase + delta));
-      return String(next);
-    });
+  const cancelEditingRow = () => {
+    setEditingRowId("");
+    setEditingDraft({ weight: "", reps: "", durationMin: "", distanceKm: "" });
+    setOpenInline(null);
+    setOpenSummaryKey(null);
   };
 
-  // Helper para fecha DD/MM/AAAA (día semana)
-  const formatDateLabel = (value) => {
-    if (!value) return "";
-    const d = value instanceof Date ? value : new Date(value);
-    const dd = String(d.getDate()).padStart(2, "0");
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const yyyy = d.getFullYear();
-    const weekday = d.toLocaleDateString("es-ES", { weekday: "long" });
-    return `${dd}/${mm}/${yyyy} (${weekday})`;
+  const handleUpdateRow = async (row) => {
+    const nextPayload = {
+      delete: false,
+      deletedAt: null,
+    };
+
+    if (row.trackingMode === TRACKING_MODES.ENDURANCE) {
+      const nextDuration = Number(editingDraft.durationMin);
+      const nextDistance = editingDraft.distanceKm === "" ? null : Number(editingDraft.distanceKm);
+      if (!Number.isFinite(nextDuration) || nextDuration <= 0) {
+        setError("Los minutos editados deben ser mayores que 0.");
+        return;
+      }
+      if (nextDistance != null && (!Number.isFinite(nextDistance) || nextDistance < 0)) {
+        setError("La distancia editada no es válida.");
+        return;
+      }
+      nextPayload.durationMin = nextDuration;
+      nextPayload.distanceKm = nextDistance;
+      nextPayload.weight = null;
+      nextPayload.reps = null;
+    } else {
+      const nextWeight = Number(editingDraft.weight);
+      const nextReps = editingDraft.reps === "" ? null : Number(editingDraft.reps);
+      if (!Number.isFinite(nextWeight) || nextWeight < 0) {
+        setError("El peso editado no es válido.");
+        return;
+      }
+      if (nextReps != null && (!Number.isFinite(nextReps) || nextReps < 1 || nextReps > 999)) {
+        setError("Las repeticiones editadas deben estar entre 1 y 999.");
+        return;
+      }
+      nextPayload.weight = nextWeight;
+      nextPayload.reps = nextReps;
+      nextPayload.durationMin = null;
+      nextPayload.distanceKm = null;
+    }
+
+    try {
+      await updateDocWithFreshAuth(doc(db, "workouts", row.id), nextPayload);
+      setAllWorkouts((previous) =>
+        sortRowsByTimestampDesc(
+          previous.map((item) => (item.id === row.id ? { ...item, ...nextPayload } : item))
+        )
+      );
+      cancelEditingRow();
+      setSaveStatus("ok");
+      setError("");
+      reloadUserData({ silent: true }).catch((refreshErr) => {
+        console.error("Error refrescando registro tras editar:", refreshErr);
+      });
+    } catch (updateErr) {
+      console.error("Error actualizando registro:", updateErr);
+      setError("No se pudo actualizar el registro.");
+    }
+  };
+
+  const handleSoftDelete = async (row) => {
+    const label = row.trackingMode === TRACKING_MODES.ENDURANCE
+      ? `${formatDurationMin(row.durationMin)} · ${row.distanceKm != null ? formatDistanceKm(row.distanceKm) : "Sin distancia"}`
+      : `${row.weight ?? "-"} kg · ${row.reps ?? "-"} reps`;
+    if (!window.confirm(`¿Marcar para borrado este registro?\n${label}`)) return;
+
+    try {
+      await updateDocWithFreshAuth(doc(db, "workouts", row.id), {
+        delete: true,
+        deletedAt: new Date(),
+      });
+      setAllWorkouts((previous) => previous.filter((item) => item.id !== row.id));
+      cancelEditingRow();
+      setSaveStatus("ok");
+      setError("");
+      reloadUserData({ silent: true }).catch((refreshErr) => {
+        console.error("Error refrescando registro tras borrar:", refreshErr);
+      });
+    } catch (deleteErr) {
+      console.error("Error marcando borrado:", deleteErr);
+      setError("No se pudo marcar el registro para borrado.");
+    }
+  };
+
+  const adjustNumericField = (setter, currentValue, delta, { min = 0, max = 999 } = {}) => {
+    const base = currentValue === "" ? 0 : Number(currentValue);
+    const safeBase = Number.isFinite(base) ? base : 0;
+    const next = Math.min(max, Math.max(min, safeBase + delta));
+    setter(String(next));
+  };
+
+  const adjustDecimalField = (setter, currentValue, delta, { min = 0, max = 999, decimals = 1 } = {}) => {
+    const base = currentValue === "" ? 0 : Number(currentValue);
+    const safeBase = Number.isFinite(base) ? base : 0;
+    const next = Math.min(max, Math.max(min, safeBase + delta));
+    setter(String(Number(next.toFixed(decimals))));
+  };
+
+  const latestSummary = latestSession ? summarizeSession(latestSession.rows, trackingMode) : null;
+  const previousSummary = previousSession ? summarizeSession(previousSession.rows, trackingMode) : null;
+  const renderSessionDetail = (session, mode) => {
+    if (!session) return null;
+    const sortedRows = sortRowsByTimestamp(session.rows);
+
+    return (
+      <div className="exercise-detail-card">
+        <table className="exercise-detail-table">
+          <thead>
+            <tr>
+              <th>Hora</th>
+              {mode === TRACKING_MODES.ENDURANCE ? (
+                <>
+                  <th>Minutos</th>
+                  <th>Distancia</th>
+                </>
+              ) : (
+                <>
+                  <th>Peso (kg)</th>
+                  <th>Reps</th>
+                </>
+              )}
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sortedRows.map((row) => (
+              <tr key={row.id}>
+                <td>{row.timestamp ? row.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</td>
+                {mode === TRACKING_MODES.ENDURANCE ? (
+                  <>
+                    <td>{row.durationMin ?? "-"}</td>
+                    <td>{row.distanceKm ?? "-"}</td>
+                  </>
+                ) : (
+                  <>
+                    <td>{row.weight ?? "-"}</td>
+                    <td>{row.reps ?? "-"}</td>
+                  </>
+                )}
+                <td>
+                  <div className="exercise-row-actions">
+                    <button
+                      type="button"
+                      className="exercise-detail-action-btn"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        startEditingRow(row);
+                      }}
+                    >
+                      Editar
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
   };
 
   return (
@@ -624,7 +784,6 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
       <form className="exercise-form-card tracker-form" onSubmit={handleSubmit}>
         <h2>Registrar ejercicio</h2>
 
-        {/* Grupo muscular y ejercicio - bloque estilizado */}
         <div className="exercise-selector-card">
           <div className="exercise-selector-row">
             <label className="exercise-selector-label" htmlFor="muscleGroup">Grupo:</label>
@@ -633,52 +792,41 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
                 id="muscleGroup"
                 type="text"
                 value={muscleGroup}
-                onChange={(e) => { setMuscleGroup(e.target.value); setOpenGroupSug(true); }}
+                onChange={(event) => {
+                  setMuscleGroup(event.target.value);
+                  setSaveStatus(null);
+                  setError("");
+                  setOpenInline(null);
+                  setOpenGroupSug(true);
+                }}
                 onFocus={() => setOpenGroupSug(true)}
-                onBlur={(e) => setMuscleGroup(normalizeText(e.target.value))}
+                onBlur={(event) => setMuscleGroup(normalizeText(event.target.value))}
                 placeholder="Escribe grupo…"
                 ref={muscleGroupInputRef}
               />
               {openGroupSug && (
-                  <div
-                    className="exercise-suggest-menu"
-                  >
+                <div className="exercise-suggest-menu">
                   {filteredGroupSuggestions.length === 0 && muscleGroup.trim() && (
-                    <div className="exercise-suggest-empty">
-                      No hay resultados para “{muscleGroup.trim()}”.
-                    </div>
+                    <div className="exercise-suggest-empty">No hay resultados para “{muscleGroup.trim()}”.</div>
                   )}
-                  {filteredGroupSuggestions.map((g, i) => (
+                  {filteredGroupSuggestions.map((group) => (
                     <div
                       className="exercise-suggest-item"
-                      key={`${g}-${i}`}
- //                    onClick={() => {
- //                     setMuscleGroup(g);
-                       onClick={() => {
-                        const cleanG = normalizeText(g);
-                        setMuscleGroup(cleanG);
-                        // Al seleccionar grupo, recalcular sugerencias de ejercicios por ese grupo
-                        const filtered = allExercises
-//                        .filter((ex) => ex.muscleGroup === g)
-//                       .map((ex) => ex.exercise);
-                          .filter((ex) => normalizeText(ex.muscleGroup) === cleanG)
-                          .map((ex) => normalizeText(ex.exercise));
-                        setSuggestions([...new Set(filtered)].sort());
+                      key={group}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        setMuscleGroup(group);
                         setOpenGroupSug(false);
                       }}
                     >
-                      {g}
+                      {group}
                     </div>
                   ))}
                 </div>
               )}
             </div>
             {muscleGroup && (
-              <button
-                type="button"
-                onClick={handleClearMuscleGroup}
-                className="exercise-clear-btn"
-              >✕</button>
+              <button type="button" onClick={handleClearMuscleGroup} className="exercise-clear-btn">✕</button>
             )}
           </div>
 
@@ -689,237 +837,206 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
                 id="exerciseName"
                 type="text"
                 value={exerciseName}
-                onChange={(e) => { setExerciseName(e.target.value); setOpenSug(true); }}
+                onChange={(event) => {
+                  setExerciseName(event.target.value);
+                  setSaveStatus(null);
+                  setError("");
+                  setOpenInline(null);
+                  setOpenSug(true);
+                }}
                 onFocus={() => setOpenSug(true)}
-                onBlur={(e) => setExerciseName(normalizeText(e.target.value))}
+                onBlur={(event) => setExerciseName(normalizeText(event.target.value))}
                 placeholder="Escribe un ejercicio…"
                 ref={exerciseInputRef}
               />
               {openSug && normalizeText(muscleGroup) && (
-          <div
-                  className="exercise-suggest-menu"
-                >
-                  { normalizeText(muscleGroup) && filteredSuggestions.length === 0 && exerciseName.trim() && (
-                    <div className="exercise-suggest-empty">
-                      No hay resultados para “{exerciseName.trim()}”.
-                    </div>
+                <div className="exercise-suggest-menu">
+                  {exerciseSuggestions.length === 0 && exerciseName.trim() && (
+                    <div className="exercise-suggest-empty">No hay resultados para “{exerciseName.trim()}”.</div>
                   )}
-                  {filteredSuggestions.map((ex, i) => (
+                  {exerciseSuggestions.map((name) => (
                     <div
                       className="exercise-suggest-item"
-                      key={`${ex}-${i}`}
-//                    onClick={() => { setExerciseName(ex); setOpenSug(false); }}
-                      onClick={() => { setExerciseName(normalizeText(ex)); setOpenSug(false); }}
+                      key={name}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        setExerciseName(name);
+                        setOpenSug(false);
+                      }}
                     >
-                      {ex}
+                      {name}
                     </div>
                   ))}
                 </div>
               )}
             </div>
             {exerciseName && (
-              <button
-                type="button"
-                onClick={handleClearExercise}
-                className="exercise-clear-btn"
-              >✕</button>
+              <button type="button" onClick={handleClearExercise} className="exercise-clear-btn">✕</button>
             )}
           </div>
         </div>
-        {/* 
-        <datalist id="exercise-list">
-          {suggestions.map((ex, i) => (
-            <option key={i} value={ex} />
-          ))}
-        </datalist>
-        */}
 
-        {/* Último registro */}
-        {headerInfo && (
-          <>
-          <p className="exercise-headline">
-            <span>
-              <strong>
-                {(() => {
-                  const rows = headerInfo._debugRows || [];
-                  const totalWeightReps = rows.reduce((sum, r) => sum + ((r.weight ?? 0) * (r.reps ?? 0)), 0);
-                  const totalReps = rows.reduce((sum, r) => sum + (r.reps ?? 0), 0);
-                  const avgWeight = totalReps > 0 ? totalWeightReps / totalReps : 0;
-                  const powerScore = Math.round(avgWeight * totalReps);
-
-                  // Indicador respecto a la sesión anterior (penúltima)
-                  let indicator = "";
-                  if (headerInfo._isPR) {
-                    indicator = " 🎉";
-                  } else if (prevHeaderInfo && Array.isArray(prevHeaderInfo._debugRows)) {
-                    const prevPS = calcPowerFromRows(prevHeaderInfo._debugRows);
-                    if (powerScore > prevPS) indicator = " ⬆️";
-                    else if (powerScore < prevPS) indicator = " ⬇️";
-                    else indicator = " ↔️";
-                  }
-
-                  const day = headerInfo._lastDay ? formatDateLabel(headerInfo._lastDay) : null;
-                  return day ? `${day} - Powerscore: ${powerScore}${indicator}`
-                             : `Powerscore: ${powerScore}${indicator}`;
-                })()}
-              </strong>
-            </span>
-            <button
-              type="button"
-              onClick={() => setOpenInline(openInline === 'last' ? null : 'last')}
-              title="Ver detalle del cálculo"
-              aria-label="Ver detalle del cálculo"
-              aria-expanded={openInline === 'last'}
-              className="exercise-info-btn"
-            >
-              ℹ️
-            </button>
-          </p>
-          {openInline === 'last' && headerInfo && Array.isArray(headerInfo._debugRows) && (
-            <div className="exercise-detail-card" style={{
-              border: "1px solid #e5e5e5",
-              borderRadius: 8,
-              padding: "6px 8px",
-              margin: "6px 0 10px",
-              background: "#fafafa",
-            }}>
-              <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
-                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
-                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...headerInfo._debugRows]
-                    .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                    .map((r, idx) => (
-                      <tr key={idx}>
-                        <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
-                          {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-                        </td>
-                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
-                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          </>
+        {!matchedExercise && exerciseName && muscleGroup && (
+          <div className="exercise-master-pending">
+            <strong>Nuevo ejercicio</strong>
+            <p>Se creará una ficha maestra al guardar. Define ahora cómo se registrará.</p>
+            <label className="exercise-master-switch" htmlFor="tracking-mode-draft">
+              <span className={`tracking-mode-option${draftTrackingMode === TRACKING_MODES.STRENGTH ? " is-active" : ""}`}>Peso / reps</span>
+              <span className="tracking-mode-slider">
+                <input
+                  id="tracking-mode-draft"
+                  type="checkbox"
+                  checked={draftTrackingMode === TRACKING_MODES.ENDURANCE}
+                  onChange={(event) => {
+                    setDraftTrackingMode(event.target.checked ? TRACKING_MODES.ENDURANCE : TRACKING_MODES.STRENGTH);
+                    setSaveStatus(null);
+                    setError("");
+                  }}
+                />
+                <span className="tracking-mode-slider-ui" aria-hidden="true" />
+              </span>
+              <span className={`tracking-mode-option${draftTrackingMode === TRACKING_MODES.ENDURANCE ? " is-active" : ""}`}>Min / dist</span>
+            </label>
+          </div>
         )}
 
-        {/* Penúltimo registro */}
-        {prevHeaderInfo && (
-          <>
-          <p className="exercise-headline">
-            <span>
-              <strong>
-                {(() => {
-                  const rows = prevHeaderInfo._debugRows || [];
-                  const totalWeightReps = rows.reduce((sum, r) => sum + ((r.weight ?? 0) * (r.reps ?? 0)), 0);
-                  const totalReps = rows.reduce((sum, r) => sum + (r.reps ?? 0), 0);
-                  const avgWeight = totalReps > 0 ? totalWeightReps / totalReps : 0;
-                  const powerScore = Math.round(avgWeight * totalReps);
-                  const day = prevHeaderInfo._lastDay ? formatDateLabel(prevHeaderInfo._lastDay) : null;
-                  return day ? `${day} - Powerscore: ${powerScore}` : `Powerscore: ${powerScore}`;
-                })()}
-              </strong>
-            </span>
-            <button
-              type="button"
-              onClick={() => setOpenInline(openInline === 'prev' ? null : 'prev')}
-              title="Ver detalle del cálculo (penúltima vez)"
-              aria-label="Ver detalle del cálculo (penúltima vez)"
-              aria-expanded={openInline === 'prev'}
-              className="exercise-info-btn"
-            >
-              ℹ️
-            </button>
+        {matchedExercise && (
+          <p className="exercise-headline exercise-headline-muted">
+            Modo activo: <strong>{trackingMode === TRACKING_MODES.ENDURANCE ? "tiempo/distancia" : "peso/reps"}</strong>
           </p>
-          {openInline === 'prev' && prevHeaderInfo && Array.isArray(prevHeaderInfo._debugRows) && (
-            <div className="exercise-detail-card" style={{
-              border: "1px solid #e5e5e5",
-              borderRadius: 8,
-              padding: "6px 8px",
-              margin: "6px 0 10px",
-              background: "#fafafa",
-            }}>
-              <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
-                <thead>
-                  <tr>
-                    <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
-                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
-                    <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...prevHeaderInfo._debugRows]
-                    .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                    .map((r, idx) => (
-                      <tr key={idx}>
-                        <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
-                          {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-                        </td>
-                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
-                        <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
-                      </tr>
-                    ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          </>
+        )}
+
+        {latestSummary && latestSession && (
+          <div className="exercise-headline exercise-headline-stack">
+            <strong>
+              {formatHeadlineDate(latestSession.date)} · {latestSummary.title}
+              <button
+                type="button"
+                className="exercise-info-btn"
+                onClick={() => setOpenInline(openInline === "latest" ? null : "latest")}
+                aria-expanded={openInline === "latest"}
+                aria-label="Ver detalle del último día"
+              >
+                i
+              </button>
+            </strong>
+            {latestSummary.detailLine && <span className="exercise-headline-submeta">{latestSummary.detailLine}</span>}
+            {openInline === "latest" && renderSessionDetail(latestSession, trackingMode)}
+          </div>
+        )}
+
+        {previousSummary && previousSession && (
+          <div className="exercise-headline exercise-headline-secondary exercise-headline-stack">
+            <strong>
+              {formatHeadlineDate(previousSession.date)} · {previousSummary.title}
+              <button
+                type="button"
+                className="exercise-info-btn"
+                onClick={() => setOpenInline(openInline === "previous" ? null : "previous")}
+                aria-expanded={openInline === "previous"}
+                aria-label="Ver detalle del día anterior"
+              >
+                i
+              </button>
+            </strong>
+            {previousSummary.detailLine && <span className="exercise-headline-submeta">{previousSummary.detailLine}</span>}
+            {openInline === "previous" && renderSessionDetail(previousSession, trackingMode)}
+          </div>
         )}
 
         <div className="exercise-entry-grid">
-          <div className="exercise-entry-field">
-            <label htmlFor="weight">Peso (kg):</label>
-            <div className="exercise-stepper-field">
-              <input
-                id="weight"
-                type="number"
-                value={weight}
-                onChange={(e) => setWeight(e.target.value)}
-                placeholder="Peso en kg"
-                inputMode="decimal"
-                list={weightSuggestions.length > 0 ? "weight-suggestions" : undefined}
-                className="exercise-stepper-input"
-              />
-              <div className="exercise-stepper-buttons">
-                <button type="button" className="exercise-stepper-btn" onClick={() => adjustWeight(-1)} aria-label="Reducir peso">−</button>
-                <button type="button" className="exercise-stepper-btn" onClick={() => adjustWeight(1)} aria-label="Aumentar peso">+</button>
+          {trackingMode === TRACKING_MODES.ENDURANCE ? (
+            <>
+              <div className="exercise-entry-field">
+                <label htmlFor="durationMin">Minutos:</label>
+                <div className="exercise-stepper-field">
+                  <input
+                    id="durationMin"
+                    type="number"
+                    value={durationMin}
+                    onChange={(event) => setDurationMin(event.target.value)}
+                    placeholder="Duración en minutos"
+                    inputMode="numeric"
+                    min={1}
+                    className="exercise-stepper-input"
+                  />
+                  <div className="exercise-stepper-buttons">
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setDurationMin, durationMin, -1, { min: 1 })} aria-label="Reducir minutos">−</button>
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setDurationMin, durationMin, 1, { min: 1 })} aria-label="Aumentar minutos">+</button>
+                  </div>
+                </div>
               </div>
-            </div>
-            {weightSuggestions.length > 0 && (
-              <datalist id="weight-suggestions">
-                {weightSuggestions.map((suggestedWeight, index) => (
-                  <option key={`${suggestedWeight}-${index}`} value={String(suggestedWeight)} />
-                ))}
-              </datalist>
-            )}
-          </div>
-          <div className="exercise-entry-field">
-            <label htmlFor="reps">Repeticiones:</label>
-            <div className="exercise-stepper-field">
-              <input
-                id="reps"
-                type="number"
-                value={reps}
-                onChange={(e) => setReps(e.target.value)}
-                placeholder="Ej: 8, 10, 12…"
-                inputMode="numeric"
-                min={1}
-                max={999}
-                className="exercise-stepper-input"
-              />
-              <div className="exercise-stepper-buttons">
-                <button type="button" className="exercise-stepper-btn" onClick={() => adjustReps(-1)} aria-label="Reducir repeticiones">−</button>
-                <button type="button" className="exercise-stepper-btn" onClick={() => adjustReps(1)} aria-label="Aumentar repeticiones">+</button>
+              <div className="exercise-entry-field">
+                <label htmlFor="distanceKm">Distancia (km):</label>
+                <div className="exercise-stepper-field">
+                  <input
+                    id="distanceKm"
+                    type="number"
+                    value={distanceKm}
+                    onChange={(event) => setDistanceKm(event.target.value)}
+                    placeholder="Opcional"
+                    inputMode="decimal"
+                    min={0}
+                    step="0.1"
+                    className="exercise-stepper-input"
+                  />
+                  <div className="exercise-stepper-buttons">
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustDecimalField(setDistanceKm, distanceKm, -0.1, { min: 0, decimals: 1 })} aria-label="Reducir distancia">−</button>
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustDecimalField(setDistanceKm, distanceKm, 0.1, { min: 0, decimals: 1 })} aria-label="Aumentar distancia">+</button>
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
+            </>
+          ) : (
+            <>
+              <div className="exercise-entry-field">
+                <label htmlFor="weight">Peso (kg):</label>
+                <div className="exercise-stepper-field">
+                  <input
+                    id="weight"
+                    type="number"
+                    value={weight}
+                    onChange={(event) => setWeight(event.target.value)}
+                    placeholder="Peso en kg"
+                    inputMode="decimal"
+                    list={weightSuggestions.length > 0 ? "weight-suggestions" : undefined}
+                    className="exercise-stepper-input"
+                  />
+                  <div className="exercise-stepper-buttons">
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setWeight, weight, -1)} aria-label="Reducir peso">−</button>
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setWeight, weight, 1)} aria-label="Aumentar peso">+</button>
+                  </div>
+                </div>
+                {weightSuggestions.length > 0 && (
+                  <datalist id="weight-suggestions">
+                    {weightSuggestions.map((suggestedWeight) => (
+                      <option key={suggestedWeight} value={String(suggestedWeight)} />
+                    ))}
+                  </datalist>
+                )}
+              </div>
+              <div className="exercise-entry-field">
+                <label htmlFor="reps">Repeticiones:</label>
+                <div className="exercise-stepper-field">
+                  <input
+                    id="reps"
+                    type="number"
+                    value={reps}
+                    onChange={(event) => setReps(event.target.value)}
+                    placeholder="Ej: 8, 10, 12…"
+                    inputMode="numeric"
+                    min={1}
+                    max={999}
+                    className="exercise-stepper-input"
+                  />
+                  <div className="exercise-stepper-buttons">
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setReps, reps, -1, { min: 1 })} aria-label="Reducir repeticiones">−</button>
+                    <button type="button" className="exercise-stepper-btn" onClick={() => adjustNumericField(setReps, reps, 1, { min: 1 })} aria-label="Aumentar repeticiones">+</button>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="exercise-actions">
@@ -934,11 +1051,7 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
                 type="button"
                 onClick={() => {
                   triggerHaptic(10);
-                  const selected = {
-                    exercise: normalizeText(exerciseName),
-                    muscleGroup: normalizeText(muscleGroup),
-                  };
-                  onSelectExercise?.(selected);
+                  commitSelection();
                   onViewChart();
                 }}
               >
@@ -950,11 +1063,7 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
                 type="button"
                 onClick={() => {
                   triggerHaptic(10);
-                  const selected = {
-                    exercise: normalizeText(exerciseName),
-                    muscleGroup: normalizeText(muscleGroup),
-                  };
-                  onSelectExercise?.(selected);
+                  commitSelection();
                   onViewLibrary?.();
                 }}
               >
@@ -964,98 +1073,54 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
           )}
         </div>
 
+        {error && <p className="exercise-save-state is-error">❌ {error}</p>}
         {saveStatus === "ok" && <p className="exercise-save-state is-ok">✅ Guardado correctamente</p>}
         {saveStatus === "nok" && <p className="exercise-save-state is-error">❌ Error al guardar</p>}
 
-        {/* Resumen */}
         <div className="exercise-summary-panel">
           <h3>Resumen de ejercicios</h3>
-          {Object.entries(summaryData.reduce((acc, item) => {
-            const group = item.muscleGroup || "Sin grupo";
-            if (!acc[group]) acc[group] = [];
-            acc[group].push(item);
-            return acc;
-          }, {})).map(([group, exercises], i) => (
-            <details className="exercise-summary-group" key={i}>
-              <summary className="exercise-summary-group-title">
-                {group}
-              </summary>
+          {groupedSummaryData.map(([group, exercises]) => (
+            <details className="exercise-summary-group" key={group}>
+              <summary className="exercise-summary-group-title">{group}</summary>
               <ul className="exercise-summary-list">
-                {exercises.map((item, index) => {
-                  const summaryKey = `${item.muscleGroup}||${item.exercise}`;
-                  const itemPowerScore = Number(item._powerScore) || 0;
-                  const lastDayLabel = item._lastDay ? formatDateLabel(item._lastDay) : "Sin fecha";
-
+                {exercises.map((item) => {
+                  const isOpen = openSummaryKey === item.summaryKey;
                   return (
-                    <li
-                      className="exercise-summary-item"
-                      key={index}
-                      onClick={() => {
-   //                   setExerciseName(item.exercise);
-   //                   setMuscleGroup(item.muscleGroup);
-                        setExerciseName(normalizeText(item.exercise));
-                        setMuscleGroup(normalizeText(item.muscleGroup));
-                        setLastWeight(item._calcWeight && item._calcWeight !== "-" ? item._calcWeight : null);
-                        setLastReps(item._repsAvg && item._repsAvg !== "-" ? item._repsAvg : null);
-                        setLastTimestamp(item._lastDay ? item._lastDay.toLocaleString() : null);
-                        const filtered = allExercises
-    .filter((ex) => normalizeText(ex.muscleGroup) === normalizeText(item.muscleGroup))
-    .map((ex) => normalizeText(ex.exercise));
-  setSuggestions([...new Set(filtered)].sort());
-  setOpenSug(false);
-                        setOpenGroupSug(false);
-                      }}
-                    >
+                    <li className="exercise-summary-item" key={item.summaryKey}>
                       <div className="exercise-summary-row">
-                        <strong className="exercise-summary-title">{item.exercise}</strong>
-                        <span className="exercise-summary-score">Score {itemPowerScore}</span>
                         <button
                           type="button"
-                          onClick={e => {
-                            e.stopPropagation();
-                            setOpenSummaryKey(openSummaryKey === summaryKey ? null : summaryKey);
-                          }}
-                          title="Ver detalle del último día"
-                          aria-label="Ver detalle del último día"
-                          aria-expanded={openSummaryKey === summaryKey}
-                          className="exercise-info-btn exercise-summary-info-btn"
+                          className="exercise-summary-select"
+                          onClick={() => applyExerciseSelection(item)}
                         >
-                          ℹ️
+                          <strong className="exercise-summary-title">{item.exercise}</strong>
                         </button>
+                        <span className="exercise-summary-score">{item.latestBadge}</span>
+                        {item.latestSession && (
+                          <button
+                            type="button"
+                            className="exercise-info-btn exercise-summary-info-btn"
+                            onClick={() => setOpenSummaryKey(isOpen ? null : item.summaryKey)}
+                            aria-expanded={isOpen}
+                            aria-label="Ver detalle del último día"
+                          >
+                            i
+                          </button>
+                        )}
                       </div>
-
-                      {openSummaryKey === summaryKey && Array.isArray(item._debugRows) && (
-                        <div className="exercise-detail-card" style={{
-                          border: "1px solid #e5e5e5",
-                          borderRadius: 8,
-                          padding: "6px 8px",
-                          margin: "6px 0 2px",
-                          background: "#fafafa",
-                        }}>
-                          <p className="exercise-summary-lastday">Último día: {lastDayLabel}</p>
-                          <table className="exercise-detail-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.95rem" }}>
-                            <thead>
-                              <tr>
-                                <th style={{ textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Hora</th>
-                                <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Peso (kg)</th>
-                                <th style={{ textAlign: "right", padding: "4px 6px", borderBottom: "1px solid #e5e5e5" }}>Reps</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {[...item._debugRows]
-                                .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                                .map((r, idx2) => (
-                                  <tr key={idx2}>
-                                    <td style={{ padding: "4px 6px", borderBottom: "1px solid #f0f0f0" }}>
-                                      {r.timestamp ? new Date(r.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
-                                    </td>
-                                    <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.weight ?? '-'}</td>
-                                    <td style={{ padding: "4px 6px", textAlign: "right", borderBottom: "1px solid #f0f0f0" }}>{r.reps ?? '-'}</td>
-                                  </tr>
-                                ))}
-                            </tbody>
-                          </table>
-                        </div>
+                      {item.latestSession ? (
+                        <>
+                          <p className="exercise-summary-lastday">
+                            Último día: {formatDateLabel(item.latestDate)}
+                            {item.latestCompactLine ? ` · ${item.latestCompactLine}` : ""}
+                          </p>
+                          {item.latestDetailLine && (
+                            <p className="exercise-summary-lastday">{item.latestDetailLine}</p>
+                          )}
+                          {isOpen && renderSessionDetail(item.latestSession, item.trackingMode)}
+                        </>
+                      ) : (
+                        <p className="exercise-summary-lastday">Todavía no hay registros para este ejercicio.</p>
                       )}
                     </li>
                   );
@@ -1065,13 +1130,267 @@ setGroupSuggestions([...new Set(all.map((d) => d.muscleGroup).filter(Boolean))].
           ))}
         </div>
       </form>
+
+      {editingRow && (
+        <div
+          className="exercise-edit-modal-backdrop"
+          onClick={cancelEditingRow}
+          role="presentation"
+        >
+          <div
+            className="exercise-edit-modal"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="exercise-edit-modal-title"
+          >
+            <div className="exercise-edit-modal-head">
+              <strong id="exercise-edit-modal-title">Editar registro</strong>
+              <button
+                type="button"
+                className="exercise-edit-close"
+                onClick={cancelEditingRow}
+                aria-label="Cerrar edición"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="exercise-edit-modal-copy">
+              {editingRow.exercise} · {formatDateLabel(editingRow.timestamp)} ·{" "}
+              {editingRow.timestamp
+                ? editingRow.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                : "--:--"}
+            </p>
+
+            <div className="exercise-entry-grid exercise-edit-grid">
+              {editingRow.trackingMode === TRACKING_MODES.ENDURANCE ? (
+                <>
+                  <div className="exercise-entry-field">
+                    <label htmlFor="edit-durationMin">Minutos:</label>
+                    <div className="exercise-stepper-field">
+                      <input
+                        id="edit-durationMin"
+                        type="number"
+                        value={editingDraft.durationMin}
+                        onChange={(event) =>
+                          setEditingDraft((prev) => ({ ...prev, durationMin: event.target.value }))
+                        }
+                        inputMode="numeric"
+                        min={1}
+                        className="exercise-stepper-input"
+                      />
+                      <div className="exercise-stepper-buttons">
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, durationMin: value })),
+                              editingDraft.durationMin,
+                              -1,
+                              { min: 1 }
+                            )
+                          }
+                          aria-label="Reducir minutos editados"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, durationMin: value })),
+                              editingDraft.durationMin,
+                              1,
+                              { min: 1 }
+                            )
+                          }
+                          aria-label="Aumentar minutos editados"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="exercise-entry-field">
+                    <label htmlFor="edit-distanceKm">Distancia (km):</label>
+                    <div className="exercise-stepper-field">
+                      <input
+                        id="edit-distanceKm"
+                        type="number"
+                        value={editingDraft.distanceKm}
+                        onChange={(event) =>
+                          setEditingDraft((prev) => ({ ...prev, distanceKm: event.target.value }))
+                        }
+                        inputMode="decimal"
+                        min={0}
+                        step="0.1"
+                        className="exercise-stepper-input"
+                      />
+                      <div className="exercise-stepper-buttons">
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustDecimalField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, distanceKm: value })),
+                              editingDraft.distanceKm,
+                              -0.1,
+                              { min: 0, decimals: 1 }
+                            )
+                          }
+                          aria-label="Reducir distancia editada"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustDecimalField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, distanceKm: value })),
+                              editingDraft.distanceKm,
+                              0.1,
+                              { min: 0, decimals: 1 }
+                            )
+                          }
+                          aria-label="Aumentar distancia editada"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="exercise-entry-field">
+                    <label htmlFor="edit-weight">Peso (kg):</label>
+                    <div className="exercise-stepper-field">
+                      <input
+                        id="edit-weight"
+                        type="number"
+                        value={editingDraft.weight}
+                        onChange={(event) =>
+                          setEditingDraft((prev) => ({ ...prev, weight: event.target.value }))
+                        }
+                        inputMode="decimal"
+                        className="exercise-stepper-input"
+                      />
+                      <div className="exercise-stepper-buttons">
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, weight: value })),
+                              editingDraft.weight,
+                              -1
+                            )
+                          }
+                          aria-label="Reducir peso editado"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, weight: value })),
+                              editingDraft.weight,
+                              1
+                            )
+                          }
+                          aria-label="Aumentar peso editado"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="exercise-entry-field">
+                    <label htmlFor="edit-reps">Repeticiones:</label>
+                    <div className="exercise-stepper-field">
+                      <input
+                        id="edit-reps"
+                        type="number"
+                        value={editingDraft.reps}
+                        onChange={(event) =>
+                          setEditingDraft((prev) => ({ ...prev, reps: event.target.value }))
+                        }
+                        inputMode="numeric"
+                        min={1}
+                        max={999}
+                        className="exercise-stepper-input"
+                      />
+                      <div className="exercise-stepper-buttons">
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, reps: value })),
+                              editingDraft.reps,
+                              -1,
+                              { min: 1 }
+                            )
+                          }
+                          aria-label="Reducir repeticiones editadas"
+                        >
+                          −
+                        </button>
+                        <button
+                          type="button"
+                          className="exercise-stepper-btn"
+                          onClick={() =>
+                            adjustNumericField(
+                              (value) => setEditingDraft((prev) => ({ ...prev, reps: value })),
+                              editingDraft.reps,
+                              1,
+                              { min: 1 }
+                            )
+                          }
+                          aria-label="Aumentar repeticiones editadas"
+                        >
+                          +
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="exercise-edit-actions">
+              <button
+                type="button"
+                className="exercise-library-btn exercise-action-btn"
+                onClick={cancelEditingRow}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="exercise-progress-btn exercise-action-btn exercise-edit-delete-btn"
+                onClick={() => handleSoftDelete(editingRow)}
+              >
+                Borrar
+              </button>
+              <button
+                type="button"
+                className="exercise-save-btn exercise-action-btn"
+                onClick={() => handleUpdateRow(editingRow)}
+              >
+                Guardar cambios
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-
-// ✅ NUEVO BLOQUE: limpiar parámetros de la URL después de usarlos
-
 };
-
-
 
 export default ExerciseForm;

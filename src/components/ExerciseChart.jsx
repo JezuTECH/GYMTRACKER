@@ -1,9 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { collection, getDocs, query, where, orderBy } from "firebase/firestore";
-import { db } from "../firebase/config";
+import { collection, orderBy, query, where } from "firebase/firestore";
 import { Line } from "react-chartjs-2";
-import { calculatePowerScore } from "../utils/calculatePowerScore";
-import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 import {
   Chart as ChartJS,
   TimeScale,
@@ -15,26 +12,68 @@ import {
 } from "chart.js";
 import "chartjs-adapter-date-fns";
 import { Info } from "lucide-react";
-// import CalcInfoModal from "./CalcInfoModal";
+import { db } from "../firebase/config";
+import { getDocsWithFreshAuth } from "../firebase/firestoreRetry";
+import { listUserExercises } from "../data/exerciseMaster";
+import { TRACKING_MODES, buildCanonicalKey, normalizeText } from "../utils/exerciseCatalog";
+import { formatDistanceKm, formatDurationMin, formatPace, getEnduranceMetrics, getStrengthMetrics } from "../utils/workoutMetrics";
+import { isMarkedDeleted } from "../utils/isMarkedDeleted";
 
 ChartJS.register(TimeScale, LinearScale, PointElement, LineElement, Tooltip, Legend);
 
-const pad2 = (n) => String(n).padStart(2, "0");
-const dateKeyLocal = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-const midnightLocal = (d) => {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
+const toJsDate = (value) => {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value.toDate === "function") return value.toDate();
+  if (typeof value.seconds === "number") return new Date(value.seconds * 1000);
+  return null;
+};
+
+const dateKeyLocal = (date) => {
+  const value = date instanceof Date ? date : new Date(date);
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+};
+
+const midnightLocal = (value) => {
+  const date = value instanceof Date ? new Date(value) : new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
 };
 
 const monthStartLocal = (value) => {
-  const d = midnightLocal(value);
-  d.setDate(1);
-  return d;
+  const date = midnightLocal(value);
+  date.setDate(1);
+  return date;
 };
 
 const formatMonthLabel = (value) =>
   new Date(value).toLocaleDateString("es-ES", { month: "short", year: "numeric" });
+
+const buildSelectionKey = (entry = {}) =>
+  normalizeText(entry.exerciseId) || buildCanonicalKey(entry.muscleGroup, entry.exercise);
+
+const matchesSelection = (row = {}, option = {}) => {
+  const optionId = normalizeText(option.exerciseId);
+  if (optionId && normalizeText(row.exerciseId) === optionId) return true;
+  return buildCanonicalKey(row.muscleGroup, row.exercise) === buildCanonicalKey(option.muscleGroup, option.exercise);
+};
+
+const mapWorkoutDoc = (snapshotDoc) => {
+  const data = snapshotDoc.data();
+  return {
+    id: snapshotDoc.id,
+    exerciseId: normalizeText(data.exerciseId),
+    exercise: normalizeText(data.exercise || data.exerciseNameSnapshot),
+    muscleGroup: normalizeText(data.muscleGroup || data.muscleGroupSnapshot),
+    trackingMode: data.trackingModeSnapshot === TRACKING_MODES.ENDURANCE ? TRACKING_MODES.ENDURANCE : TRACKING_MODES.STRENGTH,
+    weight: typeof data.weight === "number" ? data.weight : null,
+    reps: typeof data.reps === "number" ? data.reps : null,
+    durationMin: typeof data.durationMin === "number" ? data.durationMin : null,
+    distanceKm: typeof data.distanceKm === "number" ? data.distanceKm : null,
+    timestamp: toJsDate(data.timestamp),
+    deleted: isMarkedDeleted(data),
+  };
+};
 
 const ExerciseChart = ({
   user,
@@ -44,144 +83,125 @@ const ExerciseChart = ({
   onViewRegister,
   onViewLibrary,
 }) => {
-  const [allPairs, setAllPairs] = useState([]);
+  const [allExercises, setAllExercises] = useState([]);
+  const [allWorkouts, setAllWorkouts] = useState([]);
   const [muscleGroup, setMuscleGroup] = useState("");
   const [exercise, setExercise] = useState("");
-  const [pointsByDay, setPointsByDay] = useState([]);
+  const [chartMode, setChartMode] = useState("monthly");
   const [loading, setLoading] = useState(false);
-  const [chartMode, setChartMode] = useState("monthly"); // monthly | daily
-
   const [openDetailIndex, setOpenDetailIndex] = useState(null);
   const [openMonthDetailIndex, setOpenMonthDetailIndex] = useState(null);
 
-  const syncSelection = (nextGroup, nextExercise) => {
-    const cleanGroup = String(nextGroup || "").trim();
-    const cleanExercise = String(nextExercise || "").trim();
-    if (!cleanExercise) return;
-    setMuscleGroup(cleanGroup);
-    setExercise(cleanExercise);
-    onSelectExercise?.({ muscleGroup: cleanGroup, exercise: cleanExercise });
-  };
-
   useEffect(() => {
     if (!user) return;
-    const run = async () => {
-      const qAll = query(collection(db, "workouts"), where("uid", "==", user.uid));
-      const snap = await getDocs(qAll);
-      const seen = new Set();
-      const pairs = [];
-      snap.docs.forEach((doc) => {
-        const d = doc.data();
-        if (isMarkedDeleted(d)) return;
-        const mg = d.muscleGroup || "";
-        const ex = d.exercise || "";
-        if (!mg || !ex) return;
-        const key = `${mg}||${ex}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          pairs.push({ muscleGroup: mg, exercise: ex });
-        }
-      });
-      pairs.sort((a, b) => {
-        const ga = a.muscleGroup.toLowerCase();
-        const gb = b.muscleGroup.toLowerCase();
-        if (ga !== gb) return ga.localeCompare(gb);
-        return a.exercise.toLowerCase().localeCompare(b.exercise.toLowerCase());
-      });
-      setAllPairs(pairs);
+    const load = async () => {
+      setLoading(true);
+      try {
+        const [exerciseOptions, workoutSnap] = await Promise.all([
+          listUserExercises(db, user.uid),
+          getDocsWithFreshAuth(query(collection(db, "workouts"), where("uid", "==", user.uid), orderBy("timestamp", "asc"))),
+        ]);
+        setAllExercises(exerciseOptions);
+        setAllWorkouts(
+          workoutSnap.docs
+            .map(mapWorkoutDoc)
+            .filter((row) => !row.deleted && row.timestamp)
+        );
+      } catch (loadErr) {
+        console.error("Error leyendo datos de la gráfica:", loadErr);
+        setAllExercises([]);
+        setAllWorkouts([]);
+      } finally {
+        setLoading(false);
+      }
     };
-    run();
+    load();
   }, [user]);
 
   useEffect(() => {
     if (!selectedExercise || typeof selectedExercise !== "object") return;
-
-    const nextGroup = String(selectedExercise.muscleGroup || "").trim();
-    const nextExercise = String(selectedExercise.exercise || "").trim();
+    const nextGroup = normalizeText(selectedExercise.muscleGroup);
+    const nextExercise = normalizeText(selectedExercise.exercise);
     if (!nextExercise) return;
-
     setMuscleGroup(nextGroup);
     setExercise(nextExercise);
     setOpenDetailIndex(null);
     setOpenMonthDetailIndex(null);
   }, [selectedExercise]);
 
-  useEffect(() => {
-    setOpenDetailIndex(null);
-    setOpenMonthDetailIndex(null);
-  }, [chartMode]);
-
-  useEffect(() => {
-    if (!user || !muscleGroup || !exercise) {
-      setPointsByDay([]);
-      return;
+  const matchedExercise = useMemo(() => {
+    if (selectedExercise?.exerciseId) {
+      const byId = allExercises.find((item) => item.exerciseId === selectedExercise.exerciseId);
+      if (byId) return byId;
     }
-    const run = async () => {
-      setLoading(true);
-      try {
-        const qData = query(
-          collection(db, "workouts"),
-          where("uid", "==", user.uid),
-          where("muscleGroup", "==", muscleGroup),
-          where("exercise", "==", exercise),
-          orderBy("timestamp", "asc")
-        );
-        const snap = await getDocs(qData);
+    return allExercises.find(
+      (item) => buildCanonicalKey(item.muscleGroup, item.exercise) === buildCanonicalKey(muscleGroup, exercise)
+    ) || null;
+  }, [allExercises, exercise, muscleGroup, selectedExercise]);
 
-        const rows = snap.docs.map((doc) => {
-          const d = doc.data();
-          const ts = d.timestamp?.toDate
-            ? d.timestamp.toDate()
-            : (d.timestamp?.seconds ? new Date(d.timestamp.seconds * 1000) : null);
+  const syncSelection = (nextOption) => {
+    if (!nextOption?.exercise) return;
+    setMuscleGroup(nextOption.muscleGroup);
+    setExercise(nextOption.exercise);
+    onSelectExercise?.({
+      exerciseId: nextOption.exerciseId,
+      muscleGroup: nextOption.muscleGroup,
+      exercise: nextOption.exercise,
+      trackingMode: nextOption.trackingMode,
+    });
+  };
+
+  const currentRows = useMemo(() => {
+    if (!exercise || !muscleGroup) return [];
+    if (matchedExercise) {
+      return allWorkouts.filter((row) => matchesSelection(row, matchedExercise));
+    }
+    const selectionKey = buildCanonicalKey(muscleGroup, exercise);
+    return allWorkouts.filter((row) => buildSelectionKey(row) === selectionKey);
+  }, [allWorkouts, exercise, matchedExercise, muscleGroup]);
+
+  const trackingMode = matchedExercise?.trackingMode || TRACKING_MODES.STRENGTH;
+  const hasDistanceData = useMemo(
+    () => trackingMode === TRACKING_MODES.ENDURANCE && currentRows.some((row) => typeof row.distanceKm === "number" && row.distanceKm > 0),
+    [currentRows, trackingMode]
+  );
+
+  const pointsByDay = useMemo(() => {
+    const buckets = new Map();
+    currentRows.forEach((row) => {
+      const key = dateKeyLocal(row.timestamp);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(row);
+    });
+
+    return Array.from(buckets.values())
+      .map((rows) => {
+        const first = rows[0];
+        if (trackingMode === TRACKING_MODES.ENDURANCE) {
+          const metrics = getEnduranceMetrics(rows);
           return {
-            deleted: isMarkedDeleted(d),
-            ok: !!ts && typeof d.weight === "number",
-            timestamp: ts,
-            weight: d.weight,
-            reps: d.reps,
-          };
-        }).filter((r) => r.ok && !r.deleted);
-
-        const buckets = new Map();
-        rows.forEach((r) => {
-          const key = dateKeyLocal(r.timestamp);
-          if (!buckets.has(key)) {
-            buckets.set(key, []);
-          }
-          buckets.get(key).push(r);
-        });
-
-        const points = [];
-        for (const series of buckets.values()) {
-          const validSeries = series.map(s => ({
-            weight: typeof s.weight === "number" ? s.weight : 0,
-            reps: typeof s.reps === "number" ? s.reps : 10
-          }));
-
-          const totalReps = validSeries.reduce((sum, s) => sum + s.reps, 0);
-          const powerScore = calculatePowerScore(validSeries);
-
-          const first = series[0];
-          points.push({
             x: midnightLocal(first.timestamp).getTime(),
-            y: powerScore,
-            repsAvg: Math.round(totalReps / series.length),
-            series,
-            powerScore,
-          });
+            y: hasDistanceData ? metrics.totalDistanceKm || 0 : metrics.totalDurationMin,
+            rows,
+            totalDurationMin: metrics.totalDurationMin,
+            totalDistanceKm: metrics.totalDistanceKm,
+            paceMinPerKm: metrics.paceMinPerKm,
+            averageSpeedKmh: metrics.averageSpeedKmh,
+          };
         }
 
-        points.sort((a, b) => a.x - b.x);
-        setPointsByDay(points);
-      } catch (e) {
-        console.error("Error leyendo datos de la gráfica:", e);
-        setPointsByDay([]);
-      } finally {
-        setLoading(false);
-      }
-    };
-    run();
-  }, [user, muscleGroup, exercise]);
+        const metrics = getStrengthMetrics(rows);
+        return {
+          x: midnightLocal(first.timestamp).getTime(),
+          y: metrics.powerScore,
+          rows,
+          powerScore: metrics.powerScore,
+          averageWeight: metrics.averageWeight,
+          averageReps: metrics.averageReps,
+        };
+      })
+      .sort((left, right) => left.x - right.x);
+  }, [currentRows, hasDistanceData, trackingMode]);
 
   const isMonthlyMode = chartMode === "monthly";
 
@@ -192,42 +212,73 @@ const ExerciseChart = ({
     pointsByDay.forEach((point) => {
       const start = monthStartLocal(point.x);
       const key = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}`;
-      if (!monthlyBuckets.has(key)) {
-        monthlyBuckets.set(key, { start, items: [] });
-      }
+      if (!monthlyBuckets.has(key)) monthlyBuckets.set(key, { start, items: [] });
       monthlyBuckets.get(key).items.push(point);
     });
 
     return Array.from(monthlyBuckets.values())
       .map(({ start, items }) => {
-        const monthlyPower = Math.round(
-          items.reduce((acc, p) => acc + (Number(p.powerScore) || 0), 0) / items.length
-        );
-        const monthlyReps = Math.round(
-          items.reduce((acc, p) => acc + (Number(p.repsAvg) || 0), 0) / items.length
-        );
+        if (trackingMode === TRACKING_MODES.ENDURANCE) {
+          const totalDurationMin = items.reduce((sum, item) => sum + (item.totalDurationMin || 0), 0);
+          const totalDistanceKm = items.reduce((sum, item) => sum + (item.totalDistanceKm || 0), 0);
+          return {
+            x: start.getTime(),
+            y: hasDistanceData ? Number(totalDistanceKm.toFixed(2)) : totalDurationMin,
+            monthStart: start,
+            samples: items.length,
+            totalDurationMin,
+            totalDistanceKm: hasDistanceData ? Number(totalDistanceKm.toFixed(2)) : null,
+            items,
+          };
+        }
+
+        const averagePower = Math.round(items.reduce((sum, item) => sum + (item.powerScore || 0), 0) / items.length);
+        const averageReps = Math.round(items.reduce((sum, item) => sum + (item.averageReps || 0), 0) / items.length);
         return {
           x: start.getTime(),
-          y: monthlyPower,
-          powerScore: monthlyPower,
-          repsAvg: monthlyReps,
+          y: averagePower,
           monthStart: start,
           samples: items.length,
-          items: items.slice().sort((a, b) => a.x - b.x),
+          powerScore: averagePower,
+          averageReps,
+          items,
         };
       })
-      .sort((a, b) => a.x - b.x);
-  }, [isMonthlyMode, pointsByDay]);
+      .sort((left, right) => left.x - right.x);
+  }, [hasDistanceData, isMonthlyMode, pointsByDay, trackingMode]);
+
+  const yAxisLabel = useMemo(() => {
+    if (trackingMode === TRACKING_MODES.ENDURANCE) {
+      return hasDistanceData ? "Distancia (km)" : "Minutos";
+    }
+    return "PowerScore";
+  }, [hasDistanceData, trackingMode]);
 
   const chartData = useMemo(
     () => ({
       datasets: [
         {
-          label: isMonthlyMode ? "PowerScore mensual (promedio)" : "PowerScore diario",
+          label:
+            trackingMode === TRACKING_MODES.ENDURANCE
+              ? isMonthlyMode
+                ? hasDistanceData
+                  ? "Distancia mensual"
+                  : "Minutos mensuales"
+                : hasDistanceData
+                  ? "Distancia diaria"
+                  : "Minutos diarios"
+              : isMonthlyMode
+                ? "PowerScore mensual (promedio)"
+                : "PowerScore diario",
           data: chartPoints,
           borderWidth: isMonthlyMode ? 3 : 2,
-          borderColor: "#2a62ff",
-          backgroundColor: isMonthlyMode ? "rgba(42, 98, 255, 0.20)" : "#2a62ff44",
+          borderColor: trackingMode === TRACKING_MODES.ENDURANCE ? "#0f766e" : "#2a62ff",
+          backgroundColor:
+            trackingMode === TRACKING_MODES.ENDURANCE
+              ? "rgba(15, 118, 110, 0.18)"
+              : isMonthlyMode
+                ? "rgba(42, 98, 255, 0.20)"
+                : "#2a62ff44",
           fill: isMonthlyMode,
           tension: isMonthlyMode ? 0.3 : 0.2,
           pointRadius: isMonthlyMode ? 0 : 4,
@@ -236,7 +287,7 @@ const ExerciseChart = ({
         },
       ],
     }),
-    [chartPoints, isMonthlyMode]
+    [chartPoints, hasDistanceData, isMonthlyMode, trackingMode]
   );
 
   const chartOptions = useMemo(
@@ -257,7 +308,7 @@ const ExerciseChart = ({
           title: { display: !isMonthlyMode, text: "Fecha" },
         },
         y: {
-          title: { display: true, text: "PowerScore" },
+          title: { display: true, text: yAxisLabel },
           beginAtZero: false,
         },
       },
@@ -265,25 +316,26 @@ const ExerciseChart = ({
         legend: { display: true },
         tooltip: {
           callbacks: {
-            label: (ctx) =>
-              isMonthlyMode
-                ? `PowerScore medio: ${ctx.parsed.y}`
-                : `PowerScore: ${ctx.parsed.y}`,
+            label: (context) => `${yAxisLabel}: ${context.parsed.y}`,
             afterBody: (items) => {
-              const d = items[0]?.raw;
-              if (!d) return [];
-              if (isMonthlyMode) {
-                const month = d.monthStart ? formatMonthLabel(d.monthStart) : "Mes";
-                const sessions = d.samples ? `Sesiones: ${d.samples}` : null;
-                return [month, sessions].filter(Boolean);
+              const point = items[0]?.raw;
+              if (!point) return [];
+              if (trackingMode === TRACKING_MODES.ENDURANCE) {
+                const lines = [formatDurationMin(point.totalDurationMin)];
+                if (point.totalDistanceKm != null) lines.push(formatDistanceKm(point.totalDistanceKm));
+                if (point.paceMinPerKm != null) lines.push(formatPace(point.paceMinPerKm));
+                return lines;
               }
-              return d?.repsAvg ? [`Reps medias: ${d.repsAvg}`] : [];
+              return [
+                point.averageWeight != null ? `Peso medio: ${point.averageWeight} kg` : null,
+                point.averageReps != null ? `Reps medias: ${point.averageReps}` : null,
+              ].filter(Boolean);
             },
           },
         },
       },
     }),
-    [isMonthlyMode]
+    [isMonthlyMode, trackingMode, yAxisLabel]
   );
 
   return (
@@ -295,22 +347,10 @@ const ExerciseChart = ({
           <span>Mostrando ahora</span>
           <strong>{muscleGroup || "Sin grupo"} · {exercise}</strong>
           <div className="chart-active-actions">
-            <button
-              type="button"
-              onClick={() => {
-                syncSelection(muscleGroup, exercise);
-                onViewRegister?.();
-              }}
-            >
+            <button type="button" onClick={() => onViewRegister?.()}>
               Ir a registro
             </button>
-            <button
-              type="button"
-              onClick={() => {
-                syncSelection(muscleGroup, exercise);
-                onViewLibrary?.();
-              }}
-            >
+            <button type="button" onClick={() => onViewLibrary?.()}>
               Ver ficha
             </button>
           </div>
@@ -335,9 +375,6 @@ const ExerciseChart = ({
         </button>
       </div>
 
-      {/* Selector superior eliminado: se usa la lista agrupada de abajo */}
-
-      {/* Gráfica */}
       {loading && <p className="chart-loading">Cargando datos…</p>}
       {!loading && chartPoints.length > 0 && (
         <>
@@ -348,45 +385,55 @@ const ExerciseChart = ({
             <div className="chart-points">
               <strong>Resumen mensual</strong>
               <ul className="chart-points-list">
-                {chartPoints.map((point, i) => (
-                  <li className={`chart-point-item${openMonthDetailIndex === i ? " is-open" : ""}`} key={`m-${i}`}>
+                {chartPoints.map((point, index) => (
+                  <li className={`chart-point-item${openMonthDetailIndex === index ? " is-open" : ""}`} key={`m-${index}`}>
                     <div className="chart-point-row">
                       <button
                         type="button"
                         className="chart-point-toggle"
-                        onClick={() => setOpenMonthDetailIndex(openMonthDetailIndex === i ? null : i)}
-                        aria-expanded={openMonthDetailIndex === i}
-                        aria-label={openMonthDetailIndex === i ? "Ocultar detalle del mes" : "Mostrar detalle del mes"}
+                        onClick={() => setOpenMonthDetailIndex(openMonthDetailIndex === index ? null : index)}
+                        aria-expanded={openMonthDetailIndex === index}
                       >
-                        <span className="chart-point-text">
-                          {formatMonthLabel(point.monthStart)}
-                        </span>
-                        <strong>{point.powerScore}</strong>
+                        <span className="chart-point-text">{formatMonthLabel(point.monthStart)}</span>
+                        <strong>{point.y}</strong>
                       </button>
                     </div>
-                    {openMonthDetailIndex === i && (
+                    {openMonthDetailIndex === index && (
                       <div className="chart-detail-card">
                         <p className="chart-month-meta">
-                          Sesiones: <strong>{point.samples || 0}</strong> · Reps medias:{" "}
-                          <strong>{point.repsAvg ?? "-"}</strong>
+                          Sesiones: <strong>{point.samples || 0}</strong>
+                          {trackingMode === TRACKING_MODES.ENDURANCE ? (
+                            <>
+                              {" "}· Minutos: <strong>{point.totalDurationMin || 0}</strong>
+                              {point.totalDistanceKm != null && <> · Distancia: <strong>{formatDistanceKm(point.totalDistanceKm)}</strong></>}
+                            </>
+                          ) : (
+                            <> · Reps medias: <strong>{point.averageReps ?? "-"}</strong></>
+                          )}
                         </p>
                         <table className="chart-detail-table">
                           <thead>
                             <tr>
                               <th>Día</th>
-                              <th>PowerScore</th>
-                              <th>Reps medias</th>
+                              <th>{yAxisLabel}</th>
+                              <th>{trackingMode === TRACKING_MODES.ENDURANCE ? "Detalle" : "Promedio"}</th>
                             </tr>
                           </thead>
                           <tbody>
                             {(point.items || [])
                               .slice()
-                              .sort((a, b) => b.x - a.x)
-                              .map((dayPoint, idx) => (
-                                <tr key={`${point.x}-${idx}`}>
+                              .sort((left, right) => right.x - left.x)
+                              .map((dayPoint, rowIndex) => (
+                                <tr key={`${point.x}-${rowIndex}`}>
                                   <td>{new Date(dayPoint.x).toLocaleDateString("es-ES")}</td>
-                                  <td>{dayPoint.powerScore ?? "-"}</td>
-                                  <td>{dayPoint.repsAvg ?? "-"}</td>
+                                  <td>{dayPoint.y ?? "-"}</td>
+                                  <td>
+                                    {trackingMode === TRACKING_MODES.ENDURANCE
+                                      ? [formatDurationMin(dayPoint.totalDurationMin), dayPoint.totalDistanceKm != null ? formatDistanceKm(dayPoint.totalDistanceKm) : null]
+                                        .filter(Boolean)
+                                        .join(" · ")
+                                      : `${dayPoint.averageWeight ?? "-"} kg · ${dayPoint.averageReps ?? "-"} reps`}
+                                  </td>
                                 </tr>
                               ))}
                           </tbody>
@@ -401,19 +448,19 @@ const ExerciseChart = ({
             <div className="chart-points">
               <strong>Puntos diarios</strong>
               <ul className="chart-points-list">
-                {chartPoints.map((p, i) => {
-                  const isOpen = openDetailIndex === i;
+                {chartPoints.map((point, index) => {
+                  const isOpen = openDetailIndex === index;
                   return (
-                    <li className={`chart-point-item${isOpen ? " is-open" : ""}`} key={i}>
+                    <li className={`chart-point-item${isOpen ? " is-open" : ""}`} key={index}>
                       <div className="chart-point-row">
                         <span className="chart-point-text">
-                          {new Date(p.x).toLocaleDateString()} — PowerScore: {p.powerScore} — {p.repsAvg ?? "-"} reps
+                          {new Date(point.x).toLocaleDateString("es-ES")} — {yAxisLabel}: {point.y}
                         </span>
                         <button
                           className="chart-info-btn"
-                          onClick={() => setOpenDetailIndex(isOpen ? null : i)}
+                          type="button"
+                          onClick={() => setOpenDetailIndex(isOpen ? null : index)}
                           aria-expanded={isOpen}
-                          aria-label={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
                           title={isOpen ? "Ocultar detalle" : "Mostrar detalle"}
                         >
                           <Info size={16} color="#007bff" />
@@ -426,20 +473,36 @@ const ExerciseChart = ({
                             <thead>
                               <tr>
                                 <th>Hora</th>
-                                <th>Peso (kg)</th>
-                                <th>Reps</th>
+                                {trackingMode === TRACKING_MODES.ENDURANCE ? (
+                                  <>
+                                    <th>Minutos</th>
+                                    <th>Distancia</th>
+                                  </>
+                                ) : (
+                                  <>
+                                    <th>Peso (kg)</th>
+                                    <th>Reps</th>
+                                  </>
+                                )}
                               </tr>
                             </thead>
                             <tbody>
-                              {[...p.series]
-                                .sort((a, b) => (a.timestamp?.getTime?.() || 0) - (b.timestamp?.getTime?.() || 0))
-                                .map((s, idx) => (
-                                  <tr key={idx}>
-                                    <td>
-                                      {s.timestamp ? s.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}
-                                    </td>
-                                    <td>{s.weight ?? "-"}</td>
-                                    <td>{s.reps ?? "-"}</td>
+                              {[...point.rows]
+                                .sort((left, right) => (left.timestamp?.getTime?.() || 0) - (right.timestamp?.getTime?.() || 0))
+                                .map((row, rowIndex) => (
+                                  <tr key={rowIndex}>
+                                    <td>{row.timestamp ? row.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</td>
+                                    {trackingMode === TRACKING_MODES.ENDURANCE ? (
+                                      <>
+                                        <td>{row.durationMin ?? "-"}</td>
+                                        <td>{row.distanceKm ?? "-"}</td>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <td>{row.weight ?? "-"}</td>
+                                        <td>{row.reps ?? "-"}</td>
+                                      </>
+                                    )}
                                   </tr>
                                 ))}
                             </tbody>
@@ -455,47 +518,40 @@ const ExerciseChart = ({
         </>
       )}
 
-      {/* Lista agrupada por grupo muscular */}
-      {allPairs.length > 0 && (
+      {allExercises.length > 0 && (
         <div className="chart-summary">
           <h3>Resumen de ejercicios</h3>
           {Object.entries(
-            allPairs.reduce((acc, p) => {
-              const g = p.muscleGroup || "Sin grupo";
-              if (!acc[g]) acc[g] = new Set();
-              acc[g].add(p.exercise);
+            allExercises.reduce((acc, item) => {
+              const group = item.muscleGroup || "Sin grupo";
+              if (!acc[group]) acc[group] = [];
+              acc[group].push(item);
               return acc;
             }, {})
-          ).map(([group, setEx]) => {
-            const exercises = Array.from(setEx).sort((a, b) => a.localeCompare(b));
-            return (
-              <details className="chart-group" key={group}>
-                <summary className="chart-group-title">
-                  {group}
-                </summary>
-                <ul className="chart-group-list">
-                  {exercises.map((name) => (
-                    <li key={`${group}||${name}`}>
-                      <button
-                        className="chart-group-btn"
-                        type="button"
-                        onClick={() => {
-                          syncSelection(group === "Sin grupo" ? "" : group, name);
-                          window.scrollTo({ top: 0, behavior: "smooth" });
-                        }}
-                      >
-                        {name}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            );
-          })}
+          ).map(([group, entries]) => (
+            <details className="chart-group" key={group}>
+              <summary className="chart-group-title">{group}</summary>
+              <ul className="chart-group-list">
+                {entries.map((item) => (
+                  <li key={item.exerciseId || buildSelectionKey(item)}>
+                    <button
+                      className="chart-group-btn"
+                      type="button"
+                      onClick={() => {
+                        syncSelection(item);
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                      }}
+                    >
+                      {item.exercise}
+                      {item.trackingMode === TRACKING_MODES.ENDURANCE && <span className="chart-mode-chip">Tiempo</span>}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ))}
         </div>
       )}
-
-      {/* Modal eliminado: ahora el detalle se despliega inline bajo cada día */}
     </div>
   );
 };

@@ -1,8 +1,9 @@
 // src/App.js
 import "./App.css";
 import { useEffect, useState } from "react";
-import { onAuthStateChanged, signOut, getRedirectResult } from "firebase/auth";
-import { auth } from "./firebase/config";
+import { onIdTokenChanged, signOut, getRedirectResult } from "firebase/auth";
+import { doc, onSnapshot } from "firebase/firestore";
+import { auth, db, environmentLabel, isLocalTestMode } from "./firebase/config";
 import ExerciseForm from "./components/ExerciseForm";
 import ExerciseChart from "./components/ExerciseChart";
 import DangerZone from "./components/DangerZone";
@@ -10,9 +11,23 @@ import Login from "./components/Login";
 import HistoryViewer from "./components/HistoryViewer";
 import PlanDay from "./components/PlanDay";
 import ExerciseLibrary from "./components/ExerciseLibrary";
+import KpiViewer from "./components/KpiViewer";
 import { ZoomIn, ZoomOut, Sun, Moon } from "lucide-react";
+import {
+  clearLoginRedirectFlag,
+  hasFreshLoginRedirectFlag,
+} from "./utils/loginRedirectState";
 
 const BRAND_LOGO = `${process.env.PUBLIC_URL || ""}/gym-logo.svg`;
+const ADMIN_EMAIL_ALLOWLIST = new Set([
+  "jesusrodriguezsanchez@gmail.com",
+]);
+const EUR_FORMATTER = new Intl.NumberFormat("es-ES", {
+  style: "currency",
+  currency: "EUR",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
 
 const isMobileViewportNow = () => {
   if (typeof window === "undefined") return false;
@@ -22,9 +37,15 @@ const isMobileViewportNow = () => {
   return window.innerWidth <= 760;
 };
 
+const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
+
 function App() {
   const [user, setUser] = useState(null);
+  const [isAdminApp, setIsAdminApp] = useState(false);
+  const [monthlyAiCost, setMonthlyAiCost] = useState(0);
   const [authReady, setAuthReady] = useState(false);
+  const [redirectPending, setRedirectPending] = useState(() => hasFreshLoginRedirectFlag());
+  const [redirectError, setRedirectError] = useState("");
   const [view, setView] = useState("form");
   const [selectedExercise, setSelectedExercise] = useState(null);
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem("darkMode") === "true");
@@ -44,16 +65,57 @@ function App() {
   const smaller = () => applyScale(uiScale - 0.05);
   const bigger = () => applyScale(uiScale + 0.05);
 
-  const loginInProgress = localStorage.getItem("loginInProgress") === "true";
+  useEffect(() => {
+    if (!redirectPending) return undefined;
+
+    let cancelled = false;
+    getRedirectResult(auth)
+      .catch((err) => {
+        if (cancelled) return;
+        const message = String(err?.message || "").trim();
+        setRedirectError(message);
+      })
+      .finally(() => {
+        clearLoginRedirectFlag();
+        if (!cancelled) {
+          setRedirectPending(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [redirectPending]);
 
   useEffect(() => {
-    getRedirectResult(auth)
-      .finally(() => localStorage.removeItem("loginInProgress"))
-      .catch(() => {});
+    let cancelled = false;
 
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+    const unsubscribe = onIdTokenChanged(auth, async (firebaseUser) => {
+      if (!firebaseUser) {
+        if (cancelled) return;
+        setUser(null);
+        setAuthReady(true);
+        setIsAdminApp(false);
+        setMonthlyAiCost(0);
+        return;
+      }
+
+      let tokenResult = null;
+      try {
+        tokenResult = await firebaseUser.getIdTokenResult();
+      } catch (tokenErr) {
+        console.error("No se pudo leer el token de sesion:", tokenErr);
+      }
+
+      if (cancelled) return;
+
       setUser(firebaseUser);
       setAuthReady(true);
+      setRedirectError("");
+
+      const byClaim = Boolean(tokenResult?.claims?.adminApp);
+      const byEmail = ADMIN_EMAIL_ALLOWLIST.has(normalizeEmail(tokenResult?.claims?.email || firebaseUser?.email));
+      setIsAdminApp(byClaim || byEmail);
 
       const cached = localStorage.getItem("selectedExercise");
       if (cached) {
@@ -76,8 +138,33 @@ function App() {
       }
     });
 
-    return () => unsubscribe();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
+
+  useEffect(() => {
+    if (!user || !isAdminApp) {
+      setMonthlyAiCost(0);
+      return undefined;
+    }
+    const now = new Date();
+    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const ref = doc(db, "auditLogs", `ai-cost-${monthKey}`);
+    const unsubscribe = onSnapshot(
+      ref,
+      (snapshot) => {
+        const raw = Number(snapshot.data()?.totalEur ?? 0);
+        setMonthlyAiCost(Number.isFinite(raw) && raw > 0 ? raw : 0);
+      },
+      (snapshotErr) => {
+        console.error("No se pudo cargar coste IA mensual:", snapshotErr);
+        setMonthlyAiCost(0);
+      }
+    );
+    return () => unsubscribe();
+  }, [user, isAdminApp]);
 
   useEffect(() => {
     if (darkMode) {
@@ -123,12 +210,14 @@ function App() {
   };
 
   const navButtonClass = (targetView) => `app-nav-btn${view === targetView ? " is-active" : ""}`;
+  const monthlyAiCostLabel = EUR_FORMATTER.format(monthlyAiCost);
+  const displayName = user?.displayName || user?.email || (isLocalTestMode ? "Usuario test" : "Usuario");
 
-  if (!authReady || loginInProgress) {
+  if (!authReady || redirectPending) {
     return <div className="app-loading">Cargando…</div>;
   }
 
-  if (!user) return <Login />;
+  if (!user) return <Login redirectError={redirectError} />;
 
   const renderView = () => {
     switch (view) {
@@ -162,10 +251,12 @@ function App() {
             onBack={() => setView("form")}
           />
         );
+      case "kpis":
+        return <KpiViewer user={user} />;
       case "danger":
         return <DangerZone user={user} />;
       case "history":
-        return <HistoryViewer user={user} onBack={() => setView("form" )} />;
+        return <HistoryViewer user={user} onBack={() => setView("form")} />;
       case "plan":
         return (
           <PlanDay
@@ -197,14 +288,21 @@ function App() {
           <div className="app-brand">
             <img className="app-logo" src={BRAND_LOGO} alt="Gym Tracker logo" />
             <h1 className="app-title">GYM TRACKER</h1>
+            {isLocalTestMode && <span className="app-env-badge">{environmentLabel}</span>}
           </div>
           <div className="app-userbar">
             <p className="app-welcome">
-              Bienvenido <strong>{user.displayName}</strong>
+              Bienvenido <strong>{displayName}</strong>
             </p>
             <button className="app-logout" onClick={handleLogout}>
               Cerrar sesión
             </button>
+            {isAdminApp && view === "form" && (
+              <div className="app-admin-cost app-admin-cost-inline" title="Gasto de IA acumulado del mes">
+                <span className="app-admin-cost-label">IA mes</span>
+                <strong className="app-admin-cost-value">{monthlyAiCostLabel}</strong>
+              </div>
+            )}
           </div>
         </header>
 
@@ -223,12 +321,12 @@ function App() {
             {darkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
         </div>
-
         <nav className="app-nav">
-          <button className={navButtonClass("form")} onClick={() => setView("form")}>Registro</button>
-          <button className={navButtonClass("chart")} onClick={() => setView("chart")}>Progresión</button>
-          <button className={navButtonClass("history")} onClick={() => setView("history")}>Diario</button>
-          <button className={navButtonClass("library")} onClick={() => setView("library")}>Biblioteca</button>
+          <button className={`${navButtonClass("form")} app-nav-btn--form`} onClick={() => setView("form")}>Registro</button>
+          <button className={`${navButtonClass("history")} app-nav-btn--history`} onClick={() => setView("history")}>Diario</button>
+          <button className={`${navButtonClass("chart")} app-nav-btn--chart`} onClick={() => setView("chart")}>Progresión</button>
+          <button className={`${navButtonClass("kpis")} app-nav-btn--kpis`} onClick={() => setView("kpis")}>KPIs</button>
+          <button className={`${navButtonClass("library")} app-nav-btn--library`} onClick={() => setView("library")}>Biblioteca</button>
         </nav>
 
         <main className="app-view">{renderView()}</main>
