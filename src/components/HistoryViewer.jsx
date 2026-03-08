@@ -727,12 +727,12 @@ const HistoryViewer = ({ user, onBack }) => {
                                 <th>Distancia</th>
                               </>
                             ) : (
-                              <>
-                                <th>Peso (kg)</th>
-                                <th>Reps</th>
-                              </>
-                            )}
-                            <th>Acciones</th>
+                          <>
+                            <th>Peso (kg)</th>
+                            <th>Reps</th>
+                          </>
+                        )}
+                            <th aria-hidden="true"></th>
                           </tr>
                         </thead>
                         <tbody>

@@ -2257,10 +2257,14 @@ h3 {
   flex-wrap: wrap;
 }
 
+.history-detail-head strong {
+  font-size: 0.94rem;
+}
+
 .history-detail-copy {
   margin: 0;
   color: #61728f;
-  font-size: 0.84rem;
+  font-size: 0.7rem;
   font-weight: 700;
 }
 
@@ -2272,14 +2276,15 @@ h3 {
 
 .history-series-table th,
 .history-series-table td {
-  padding: 0.33rem 0.4rem;
+  padding: 0.28rem 0.36rem;
   border-bottom: 1px solid #e5ecf9;
+  font-size: 0.86rem;
 }
 
 .history-series-table th {
   text-align: left;
   color: #3d5378;
-  font-size: 0.74rem;
+  font-size: 0.64rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
 }
@@ -3268,6 +3273,24 @@ h3 {
 
   .history-detail-head {
     gap: 0.35rem;
+  }
+
+  .history-detail-head strong {
+    font-size: 0.8rem;
+  }
+
+  .history-detail-copy {
+    font-size: 0.62rem;
+  }
+
+  .history-series-table th,
+  .history-series-table td {
+    padding: 0.24rem 0.28rem;
+    font-size: 0.74rem;
+  }
+
+  .history-series-table th {
+    font-size: 0.56rem;
   }
 
   body.dark-mode .app-brand {
