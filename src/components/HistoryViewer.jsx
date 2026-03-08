@@ -218,18 +218,6 @@ const HistoryViewer = ({ user, onBack }) => {
     }
   };
 
-  const handleDateChange = (e) => {
-    const date = e.target.value;
-    setSelectedDate(date);
-    setOpenKey(null);
-    setMetricsMessage("");
-    setMetricsError("");
-    if (date) {
-      setMonthCursor(startOfMonth(date));
-    }
-    fetchRecords(date);
-  };
-
   useEffect(() => {
     if (!user) return;
     let cancelled = false;
@@ -568,22 +556,8 @@ const HistoryViewer = ({ user, onBack }) => {
 
   return (
     <div className="history-viewer-shell history-page">
-      <header className="history-head">
-        <h2>Historial diario</h2>
-        <p>Selecciona una fecha y consulta el detalle por ejercicio.</p>
-      </header>
-
-      <label className="history-label" htmlFor="date-picker">Selecciona una fecha</label>
-      <input
-        className="history-date-input"
-        type="date"
-        id="date-picker"
-        value={selectedDate}
-        onChange={handleDateChange}
-      />
       <section className="history-calendar-card">
         <div className="history-calendar-head">
-          <strong>Días con actividad</strong>
           <div className="history-month-nav">
             <button type="button" onClick={() => shiftMonth(-1)} aria-label="Mes anterior">←</button>
             <span>{monthLabel}</span>
@@ -628,62 +602,51 @@ const HistoryViewer = ({ user, onBack }) => {
         )}
       </section>
 
-      <section className="history-metrics-card">
-        <div className="history-metrics-head">
-          <strong>Resumen del día</strong>
-          <span>{selectedDate || "Elige fecha"}</span>
-        </div>
-
-        {!selectedDate ? (
-          <p className="history-metrics-help">
-            Selecciona una fecha para añadir calorías y minutos.
-          </p>
-        ) : (
-          <>
-            <div className="history-metrics-grid">
-              <div className="history-metrics-field">
-                <label className="history-label" htmlFor="history-calories">Calorías (kcal)</label>
-                <input
-                  id="history-calories"
-                  type="number"
-                  min="0"
-                  step="1"
-                  inputMode="numeric"
-                  placeholder="Ej: 520"
-                  value={metricsDraft.calories}
-                  onChange={(event) => setMetricsDraft((prev) => ({ ...prev, calories: event.target.value }))}
-                />
-              </div>
-              <div className="history-metrics-field">
-                <label className="history-label" htmlFor="history-minutes">Tiempo entreno (min)</label>
-                <input
-                  id="history-minutes"
-                  type="number"
-                  min="0"
-                  step="1"
-                  inputMode="numeric"
-                  placeholder="Ej: 75"
-                  value={metricsDraft.minutes}
-                  onChange={(event) => setMetricsDraft((prev) => ({ ...prev, minutes: event.target.value }))}
-                />
-              </div>
+      {selectedDate && (
+        <section className="history-metrics-card">
+          <div className="history-metrics-grid">
+            <div className="history-metrics-field">
+              <label className="history-label" htmlFor="history-calories">Calorías (kcal)</label>
+              <input
+                id="history-calories"
+                type="number"
+                min="0"
+                step="1"
+                inputMode="numeric"
+                placeholder="Ej: 520"
+                value={metricsDraft.calories}
+                onChange={(event) => setMetricsDraft((prev) => ({ ...prev, calories: event.target.value }))}
+              />
             </div>
-            <div className="history-metrics-actions">
-              <button
-                type="button"
-                className="history-metrics-save-btn"
-                onClick={handleSaveDailyMetrics}
-                disabled={metricsSaving}
-              >
-                {metricsSaving ? "Guardando..." : "Guardar resumen"}
-              </button>
+            <div className="history-metrics-field">
+              <label className="history-label" htmlFor="history-minutes">Duración (min)</label>
+              <input
+                id="history-minutes"
+                type="number"
+                min="0"
+                step="1"
+                inputMode="numeric"
+                placeholder="Ej: 75"
+                value={metricsDraft.minutes}
+                onChange={(event) => setMetricsDraft((prev) => ({ ...prev, minutes: event.target.value }))}
+              />
             </div>
-          </>
-        )}
+          </div>
+          <div className="history-metrics-actions">
+            <button
+              type="button"
+              className="history-metrics-save-btn"
+              onClick={handleSaveDailyMetrics}
+              disabled={metricsSaving}
+            >
+              {metricsSaving ? "Guardando..." : "Guardar resumen"}
+            </button>
+          </div>
 
-        {metricsMessage && <p className="history-metrics-msg is-ok">{metricsMessage}</p>}
-        {metricsError && <p className="history-metrics-msg is-error">{metricsError}</p>}
-      </section>
+          {metricsMessage && <p className="history-metrics-msg is-ok">{metricsMessage}</p>}
+          {metricsError && <p className="history-metrics-msg is-error">{metricsError}</p>}
+        </section>
+      )}
 
       {loading && <p className="history-state">Cargando...</p>}
 

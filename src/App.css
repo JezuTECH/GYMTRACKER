@@ -1933,21 +1933,6 @@ h3 {
   padding: 1rem;
 }
 
-.history-head {
-  margin-bottom: 0.7rem;
-}
-
-.history-head h2 {
-  margin: 0;
-  color: #163f9e;
-}
-
-.history-head p {
-  margin: 0.25rem 0 0;
-  font-size: 0.88rem;
-  color: var(--muted);
-}
-
 .history-label {
   display: block;
   font-size: 0.78rem;
@@ -1956,10 +1941,6 @@ h3 {
   text-transform: uppercase;
   color: #445877;
   margin-bottom: 0.3rem;
-}
-
-.history-date-input {
-  margin-bottom: 0.75rem;
 }
 
 .history-calendar-card {
@@ -1973,14 +1954,8 @@ h3 {
 .history-calendar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 0.5rem;
-}
-
-.history-calendar-head strong {
-  font-size: 0.8rem;
-  color: #41567d;
-  letter-spacing: 0.02em;
 }
 
 .history-month-nav {
@@ -2094,34 +2069,11 @@ h3 {
   margin-bottom: 0.68rem;
 }
 
-.history-metrics-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-}
-
-.history-metrics-head strong {
-  color: #294878;
-}
-
-.history-metrics-head span {
-  font-size: 0.78rem;
-  color: #5e7191;
-  font-weight: 700;
-}
-
-.history-metrics-help {
-  margin: 0.38rem 0 0;
-  color: #627391;
-  font-size: 0.85rem;
-}
-
 .history-metrics-grid {
-  margin-top: 0.44rem;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.52rem;
+  align-items: end;
 }
 
 .history-metrics-field {
@@ -3509,7 +3461,6 @@ body.dark-mode .danger-zone-card {
 body.dark-mode .exercise-summary-panel h3,
 body.dark-mode .chart-page h2,
 body.dark-mode .chart-summary h3,
-body.dark-mode .history-head h2,
 body.dark-mode .login-screen h2 {
   color: #9bc1ff;
 }
@@ -3522,7 +3473,6 @@ body.dark-mode .exercise-headline,
 body.dark-mode .exercise-summary-title,
 body.dark-mode .exercise-summary-lastday,
 body.dark-mode .history-card-scoreline span,
-body.dark-mode .history-head p,
 body.dark-mode .history-state,
 body.dark-mode .history-empty,
 body.dark-mode .login-status,
@@ -3536,15 +3486,6 @@ body.dark-mode .danger-zone-card p {
 body.dark-mode .history-metrics-card {
   background: rgba(23, 33, 47, 0.95);
   border-color: #415170;
-}
-
-body.dark-mode .history-metrics-head strong {
-  color: #c8d7f2;
-}
-
-body.dark-mode .history-metrics-head span,
-body.dark-mode .history-metrics-help {
-  color: #9fb1cf;
 }
 
 body.dark-mode .history-metrics-msg.is-ok {
@@ -3789,7 +3730,6 @@ body.dark-mode .exercise-form-card > div:first-of-type {
 
 body.dark-mode .app-title,
 body.dark-mode .library-head h2,
-body.dark-mode .history-head h2,
 body.dark-mode .chart-page h2,
 body.dark-mode .kpi-head h2,
 body.dark-mode .login-screen h2 {
@@ -3805,7 +3745,6 @@ body.dark-mode .kpi-head p,
 body.dark-mode .kpi-period,
 body.dark-mode .kpi-empty-copy,
 body.dark-mode .kpi-message,
-body.dark-mode .history-head p,
 body.dark-mode .history-state,
 body.dark-mode .history-empty,
 body.dark-mode .login-help,
