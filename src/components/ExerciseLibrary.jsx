@@ -24,7 +24,6 @@ import {
 import { compressImageFile } from "../utils/compressImageFile";
 import {
   MAX_PHOTOS_PER_EXERCISE,
-  MAX_USER_MEDIA_BYTES,
   formatBytesLabel,
   getRemainingPhotoSlots,
 } from "../utils/exerciseMediaLimits";
@@ -185,7 +184,7 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
     return allExercises.find((item) => exerciseMatchesCanonicalKey(item, currentCanonicalKey)) || null;
   }, [allExercises, currentCanonicalKey, exercise, muscleGroup]);
   const remainingPhotoSlots = getRemainingPhotoSlots(mediaItems.length);
-  const mediaSummaryLabel = `${mediaItems.length}/${MAX_PHOTOS_PER_EXERCISE} fotos · ${formatBytesLabel(mediaUsageBytes)} / ${formatBytesLabel(MAX_USER_MEDIA_BYTES)}`;
+  const mediaSummaryLabel = `${mediaItems.length}/${MAX_PHOTOS_PER_EXERCISE} fotos`;
 
   const applySelection = async (nextSelection = {}, options = {}) => {
     const nextGroup = normalizeText(nextSelection.muscleGroup);
@@ -700,7 +699,7 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
             <div className="library-card-title-block">
               <h3>{normalizeText(muscleGroup)} · {normalizeText(exercise)}</h3>
               {activeExerciseId ? (
-                <p className="library-meta">Ficha maestra existente. Los cambios mantienen su identidad interna.</p>
+                <p className="library-meta">Ficha maestra existente.</p>
               ) : (
                 <p className="library-meta">Aún no existe ficha maestra. Guarda para crearla.</p>
               )}
@@ -723,11 +722,6 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
                   </span>
                   <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.ENDURANCE ? " is-active" : ""}`}>Min / dist</span>
                 </label>
-                <p className="library-help-text">
-                  {draft.trackingMode === TRACKING_MODES.ENDURANCE
-                    ? "Este ejercicio se registrará con minutos obligatorios y distancia opcional."
-                    : "Este ejercicio se registrará con peso y repeticiones."}
-                </p>
               </div>
             </div>
             <button className="library-save-btn" onClick={handleSave} type="button" disabled={saving || loading}>
@@ -749,12 +743,7 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
             </div>
             <div className="library-full library-media-section">
               <div className="library-media-head">
-                <div>
-                  <label>Fotos de la ficha</label>
-                  <p className="library-help-text">
-                    Hasta {MAX_PHOTOS_PER_EXERCISE} fotos por ejercicio, comprimidas en cliente y con un máximo de {formatBytesLabel(2 * 1024 * 1024)} por foto.
-                  </p>
-                </div>
+                <label>Fotos de la ficha</label>
                 <span className="library-media-usage">{mediaSummaryLabel}</span>
               </div>
 
