@@ -3130,6 +3130,33 @@ h3 {
     border-radius: 16px;
   }
 
+  .library-list h3 {
+    font-size: 0.7rem;
+  }
+
+  .library-group summary {
+    font-size: 0.82rem;
+  }
+
+  .library-group button {
+    padding: 0.34rem 0.42rem;
+  }
+
+  .library-exercise-name {
+    font-size: 0.7rem;
+  }
+
+  .library-mode-badge {
+    font-size: 0.58rem;
+    padding: 0.14rem 0.34rem;
+  }
+
+  .library-youtube-badge,
+  .library-photo-badge {
+    width: 20px;
+    height: 20px;
+  }
+
   .library-form-grid {
     grid-template-columns: 1fr;
   }

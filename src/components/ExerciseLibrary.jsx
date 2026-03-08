@@ -694,9 +694,7 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
       {error && <p className="library-message is-error">{error}</p>}
       {loading && <p className="library-empty">Cargando biblioteca...</p>}
 
-      {!exercise || !muscleGroup ? (
-        <p className="library-empty">Selecciona grupo y ejercicio para ver o crear su ficha.</p>
-      ) : (
+      {!exercise || !muscleGroup ? null : (
         <section className="library-card">
           <div className="library-card-head">
             <div className="library-card-title-block">
