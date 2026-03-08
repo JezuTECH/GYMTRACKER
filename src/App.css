@@ -1832,6 +1832,7 @@ h3 {
 
 .library-list h3 {
   margin: 0 0 0.6rem;
+  font-size: 0.8rem;
   color: #163f9e;
 }
 
@@ -1847,6 +1848,7 @@ h3 {
   cursor: pointer;
   font-weight: 800;
   color: #304b79;
+  font-size: 0.96rem;
 }
 
 .library-group ul {
@@ -1871,6 +1873,7 @@ h3 {
 }
 
 .library-exercise-name {
+  font-size: 0.82rem;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2209,11 +2212,13 @@ h3 {
 .history-card-group {
   font-weight: 800;
   color: #32486f;
+  font-size: 0.82rem;
 }
 
 .history-card-exercise {
   color: #1f304d;
   text-align: right;
+  font-size: 0.82rem;
 }
 
 .history-card-scoreline {
@@ -2225,7 +2230,7 @@ h3 {
 }
 
 .history-card-scoreline span {
-  font-size: 0.76rem;
+  font-size: 0.61rem;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: #667895;
@@ -2233,7 +2238,7 @@ h3 {
 }
 
 .history-card-scoreline strong {
-  font-size: 1.28rem;
+  font-size: 1.02rem;
   line-height: 1;
   color: #1a2a47;
 }
@@ -3232,7 +3237,7 @@ h3 {
 
   .history-card-exercise {
     text-align: right;
-    font-size: 0.9rem;
+    font-size: 0.72rem;
     line-height: 1.2;
     white-space: nowrap;
     overflow: hidden;
@@ -3244,8 +3249,16 @@ h3 {
     margin-top: 0.12rem;
   }
 
+  .history-card-group {
+    font-size: 0.72rem;
+  }
+
+  .history-card-scoreline span {
+    font-size: 0.58rem;
+  }
+
   .history-card-scoreline strong {
-    font-size: 0.98rem;
+    font-size: 0.8rem;
   }
 
   .history-detail {
