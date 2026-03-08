@@ -48,13 +48,16 @@ export const buildKpiSummary = ({
   const activeDays = new Set();
   const uniqueExercises = new Set();
   const activeMuscleGroups = new Set();
-  const topGroups = new Map();
-  const topExercises = new Map();
+  const strengthGroups = new Map();
+  const strengthExercises = new Map();
+  const strengthDays = new Map();
+  const enduranceExercises = new Map();
   const enduranceGroups = new Map();
 
   let totalRecords = 0;
   let strengthRecords = 0;
   let enduranceRecords = 0;
+  let totalStrengthPower = 0;
   let enduranceMinutes = 0;
   let enduranceDistance = 0;
   let hasEnduranceDistance = false;
@@ -75,11 +78,9 @@ export const buildKpiSummary = ({
     if (timestamp) activeDays.add(dateKeyLocal(timestamp));
     if (exercise) {
       uniqueExercises.add(exercise);
-      topExercises.set(exercise, (topExercises.get(exercise) || 0) + 1);
     }
     if (muscleGroup) {
       activeMuscleGroups.add(muscleGroup);
-      topGroups.set(muscleGroup, (topGroups.get(muscleGroup) || 0) + 1);
     }
 
     if (trackingMode === TRACKING_MODES.ENDURANCE) {
@@ -91,6 +92,9 @@ export const buildKpiSummary = ({
         enduranceDistance += distance;
         hasEnduranceDistance = true;
       }
+      if (exercise && minutes > 0) {
+        enduranceExercises.set(exercise, (enduranceExercises.get(exercise) || 0) + minutes);
+      }
       if (muscleGroup && minutes > 0) {
         enduranceGroups.set(muscleGroup, (enduranceGroups.get(muscleGroup) || 0) + minutes);
       }
@@ -98,6 +102,18 @@ export const buildKpiSummary = ({
     }
 
     strengthRecords += 1;
+    const power = Math.max(0, toFiniteNumber(item.weight)) * Math.max(0, toFiniteNumber(item.reps));
+    totalStrengthPower += power;
+    if (exercise && power > 0) {
+      strengthExercises.set(exercise, (strengthExercises.get(exercise) || 0) + power);
+    }
+    if (muscleGroup && power > 0) {
+      strengthGroups.set(muscleGroup, (strengthGroups.get(muscleGroup) || 0) + power);
+    }
+    if (timestamp && power > 0) {
+      const dayKey = dateKeyLocal(timestamp);
+      strengthDays.set(dayKey, (strengthDays.get(dayKey) || 0) + power);
+    }
   });
 
   let totalMinutes = 0;
@@ -123,6 +139,11 @@ export const buildKpiSummary = ({
 
   const averageMinutesPerActiveDay =
     hasMinutes && activeDays.size > 0 ? Math.round(totalMinutes / activeDays.size) : null;
+  const totalStrengthPowerRounded = strengthRecords > 0 ? Math.round(totalStrengthPower) : null;
+  const bestStrengthDayPower =
+    strengthDays.size > 0 ? Math.round(Math.max(...strengthDays.values())) : null;
+  const averageStrengthPowerPerDay =
+    strengthDays.size > 0 ? Math.round(totalStrengthPower / strengthDays.size) : null;
   const enduranceDistanceRounded = hasEnduranceDistance ? Number(enduranceDistance.toFixed(2)) : null;
   const averageSpeedKmh =
     enduranceDistanceRounded && enduranceMinutes > 0
@@ -144,12 +165,16 @@ export const buildKpiSummary = ({
     totalCalories: hasCalories ? totalCalories : null,
     strengthRecords,
     enduranceRecords,
+    totalStrengthPower: totalStrengthPowerRounded,
+    bestStrengthDayPower,
+    averageStrengthPowerPerDay,
     enduranceMinutes,
     enduranceDistance: enduranceDistanceRounded,
     averageSpeedKmh,
     endurancePace,
-    topGroups: sortTopList(topGroups),
-    topExercises: sortTopList(topExercises),
+    strengthGroups: sortTopList(strengthGroups),
+    strengthExercises: sortTopList(strengthExercises),
+    enduranceExercises: sortTopList(enduranceExercises),
     enduranceGroups: sortTopList(enduranceGroups),
   };
 };

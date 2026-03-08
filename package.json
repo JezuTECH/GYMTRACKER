@@ -28,7 +28,7 @@
     "test": "react-scripts test",
     "eject": "react-scripts eject",
     "dev": "npm start",
-    "emulators": "firebase emulators:start --only auth,firestore,functions"
+    "emulators": "firebase emulators:start --only auth,firestore,functions,storage"
   },
   "eslintConfig": {
     "extends": [

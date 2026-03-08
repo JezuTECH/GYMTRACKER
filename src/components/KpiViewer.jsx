@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { collection, doc, orderBy, query, where } from "firebase/firestore";
-import { httpsCallable } from "firebase/functions";
-import { db, functions, isLocalTestMode } from "../firebase/config";
+import { db } from "../firebase/config";
 import { getDocWithFreshAuth, getDocsWithFreshAuth } from "../firebase/firestoreRetry";
 import { listUserExercises } from "../data/exerciseMaster";
 import { buildKpiSummary, getKpiDateRange } from "../utils/buildKpiSummary";
@@ -39,7 +38,6 @@ const buildStatCards = (summary) => {
   const cards = [
     { label: "Días activos", value: formatMetric(summary.activeDays) },
     { label: "Minutos", value: summary.totalMinutes != null ? `${summary.totalMinutes} min` : "-" },
-    { label: "Registros", value: formatMetric(summary.totalRecords) },
     { label: "Ejercicios", value: formatMetric(summary.uniqueExercises) },
     { label: "Grupos", value: formatMetric(summary.activeMuscleGroups) },
     { label: "Min/día activo", value: summary.averageMinutesPerActiveDay != null ? `${summary.averageMinutesPerActiveDay} min` : "-" },
@@ -48,8 +46,14 @@ const buildStatCards = (summary) => {
   if (summary.totalCalories != null) {
     cards.push({ label: "Calorías", value: `${summary.totalCalories} kcal` });
   }
-  if (summary.strengthRecords > 0) {
-    cards.push({ label: "Series fuerza", value: formatMetric(summary.strengthRecords) });
+  if (summary.totalStrengthPower != null) {
+    cards.push({ label: "Power fuerza", value: formatMetric(summary.totalStrengthPower) });
+  }
+  if (summary.bestStrengthDayPower != null) {
+    cards.push({ label: "Pico fuerza", value: formatMetric(summary.bestStrengthDayPower) });
+  }
+  if (summary.averageStrengthPowerPerDay != null) {
+    cards.push({ label: "Power/día", value: formatMetric(summary.averageStrengthPowerPerDay) });
   }
   if (summary.enduranceMinutes > 0) {
     cards.push({ label: "Min resistencia", value: `${summary.enduranceMinutes} min` });
@@ -105,10 +109,6 @@ const KpiViewer = ({ user }) => {
   const [loading, setLoading] = useState(false);
   const [summary, setSummary] = useState(null);
   const [error, setError] = useState("");
-  const [emailSending, setEmailSending] = useState(false);
-  const [emailMessage, setEmailMessage] = useState("");
-  const [emailError, setEmailError] = useState("");
-  const [emailPreviewUrl, setEmailPreviewUrl] = useState("");
   const selectedRange = useMemo(() => getKpiDateRange(days), [days]);
 
   useEffect(() => {
@@ -171,35 +171,11 @@ const KpiViewer = ({ user }) => {
 
   const statCards = useMemo(() => (summary ? buildStatCards(summary) : []), [summary]);
 
-  const handleSendSummaryEmail = async () => {
-    if (!user) return;
-    setEmailSending(true);
-    setEmailMessage("");
-    setEmailError("");
-    setEmailPreviewUrl("");
-    try {
-      const callable = httpsCallable(functions, "sendWorkoutSummaryEmail");
-      const response = await callable({ days });
-      const data = typeof response?.data === "object" && response?.data ? response.data : {};
-      if (data.previewUrl) {
-        setEmailPreviewUrl(String(data.previewUrl));
-        setEmailMessage("Resumen generado.");
-      } else {
-        setEmailMessage("Resumen generado correctamente.");
-      }
-    } catch (sendErr) {
-      console.error("Error enviando KPIs por correo:", sendErr);
-      setEmailError(sendErr?.message || "No se pudo generar el correo de KPIs.");
-    } finally {
-      setEmailSending(false);
-    }
-  };
-
   return (
     <div className="exercise-chart-shell kpi-page">
       <header className="kpi-head">
         <h2>KPIs</h2>
-        <p>Resumen útil de los últimos 7 o 30 días y envío por correo.</p>
+        <p>Resumen útil de fuerza y resistencia de los últimos 7 o 30 días.</p>
         <span className="kpi-period">
           Periodo: {formatDateLabel(selectedRange.start)} - {formatDateLabel(selectedRange.end)}
         </span>
@@ -222,10 +198,6 @@ const KpiViewer = ({ user }) => {
             Últimos 30 días
           </button>
         </div>
-        <div className="kpi-mail-chip">
-          <span>Correo</span>
-          <strong>{user?.email || (isLocalTestMode ? "Modo test" : "Sin correo")}</strong>
-        </div>
       </section>
 
       {loading && <p className="kpi-empty-copy">Cargando KPIs...</p>}
@@ -243,47 +215,10 @@ const KpiViewer = ({ user }) => {
           </section>
 
           <section className="kpi-section-grid">
-            <KpiRankSection title="Top grupos" items={summary.topGroups} />
-            <KpiRankSection title="Top ejercicios" items={summary.topExercises} />
-            <KpiRankSection title="Min resistencia por grupo" items={summary.enduranceGroups} suffix=" min" />
-          </section>
-
-          <section className="kpi-mail-card">
-            <div className="kpi-mail-head">
-              <div>
-                <strong>Enviar resumen</strong>
-                <p>
-                  {isLocalTestMode
-                    ? "Se enviará el mismo periodo visible en pantalla."
-                    : "El envío por correo se activará en una salida posterior."}
-                </p>
-              </div>
-              {isLocalTestMode && (
-                <button
-                  type="button"
-                  className="kpi-send-btn"
-                  onClick={handleSendSummaryEmail}
-                  disabled={emailSending}
-                >
-                  {emailSending ? "Generando..." : `Enviar ${summary.days} días`}
-                </button>
-              )}
-            </div>
-            {isLocalTestMode && emailMessage && (
-              <p className="kpi-message is-ok">
-                {emailPreviewUrl ? (
-                  <>
-                    {emailMessage}{" "}
-                    <a href={emailPreviewUrl} target="_blank" rel="noreferrer">
-                      Abrir vista previa
-                    </a>
-                  </>
-                ) : (
-                  emailMessage
-                )}
-              </p>
-            )}
-            {isLocalTestMode && emailError && <p className="kpi-message is-error">{emailError}</p>}
+            <KpiRankSection title="Fuerza por grupo" items={summary.strengthGroups} />
+            <KpiRankSection title="Fuerza por ejercicio" items={summary.strengthExercises} />
+            <KpiRankSection title="Resistencia por ejercicio" items={summary.enduranceExercises} suffix=" min" />
+            <KpiRankSection title="Resistencia por grupo" items={summary.enduranceGroups} suffix=" min" />
           </section>
         </>
       )}

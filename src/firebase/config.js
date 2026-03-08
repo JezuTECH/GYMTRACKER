@@ -10,6 +10,10 @@ import {
   getFunctions,
   connectFunctionsEmulator,
 } from "firebase/functions";
+import {
+  getStorage,
+  connectStorageEmulator,
+} from "firebase/storage";
 
 const PROD_PROJECT_ID = "gymtracker-a01c8";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1"]);
@@ -31,6 +35,7 @@ const db = initializeFirestore(app, {
 });
 const auth = getAuth(app);
 const functions = getFunctions(app, "us-central1");
+const storage = getStorage(app);
 
 const runtimeHostname =
   typeof window !== "undefined" && window.location?.hostname
@@ -44,6 +49,7 @@ const emulatorPorts = {
   auth: Number(process.env.REACT_APP_FIREBASE_AUTH_EMULATOR_PORT || 9099),
   firestore: Number(process.env.REACT_APP_FIREBASE_FIRESTORE_EMULATOR_PORT || 8080),
   functions: Number(process.env.REACT_APP_FIREBASE_FUNCTIONS_EMULATOR_PORT || 5001),
+  storage: Number(process.env.REACT_APP_FIREBASE_STORAGE_EMULATOR_PORT || 9199),
 };
 const requestedEmulators = String(
   process.env.REACT_APP_USE_FIREBASE_EMULATORS ?? (isLocalRuntime ? "true" : "false")
@@ -64,6 +70,7 @@ if (useFirebaseEmulators && !runtimeScope.__gymTrackerFirebaseEmulatorsConnected
   });
   connectFirestoreEmulator(db, emulatorHost, emulatorPorts.firestore);
   connectFunctionsEmulator(functions, emulatorHost, emulatorPorts.functions);
+  connectStorageEmulator(storage, emulatorHost, emulatorPorts.storage);
   runtimeScope.__gymTrackerFirebaseEmulatorsConnected = true;
 }
 
@@ -82,6 +89,7 @@ export {
   db,
   auth,
   functions,
+  storage,
   googleProvider,
   environmentLabel,
   isLocalTestMode,

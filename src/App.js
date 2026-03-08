@@ -2,8 +2,7 @@
 import "./App.css";
 import { useEffect, useState } from "react";
 import { onIdTokenChanged, signOut, getRedirectResult } from "firebase/auth";
-import { doc, onSnapshot } from "firebase/firestore";
-import { auth, db, environmentLabel, isLocalTestMode } from "./firebase/config";
+import { auth, environmentLabel, isLocalTestMode } from "./firebase/config";
 import ExerciseForm from "./components/ExerciseForm";
 import ExerciseChart from "./components/ExerciseChart";
 import DangerZone from "./components/DangerZone";
@@ -19,15 +18,6 @@ import {
 } from "./utils/loginRedirectState";
 
 const BRAND_LOGO = `${process.env.PUBLIC_URL || ""}/gym-logo.svg`;
-const ADMIN_EMAIL_ALLOWLIST = new Set([
-  "jesusrodriguezsanchez@gmail.com",
-]);
-const EUR_FORMATTER = new Intl.NumberFormat("es-ES", {
-  style: "currency",
-  currency: "EUR",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 
 const isMobileViewportNow = () => {
   if (typeof window === "undefined") return false;
@@ -37,12 +27,26 @@ const isMobileViewportNow = () => {
   return window.innerWidth <= 760;
 };
 
-const normalizeEmail = (value) => String(value || "").trim().toLowerCase();
+const getShortUserName = (user) => {
+  const rawName = String(user?.displayName || "").trim();
+  if (rawName) {
+    return rawName.split(/\s+/)[0];
+  }
+
+  const rawEmail = String(user?.email || "").trim();
+  if (rawEmail) {
+    const localPart = rawEmail.split("@")[0] || "";
+    const firstChunk = localPart.split(/[._-]+/).filter(Boolean)[0] || localPart;
+    if (firstChunk) {
+      return firstChunk;
+    }
+  }
+
+  return isLocalTestMode ? "test" : "usuario";
+};
 
 function App() {
   const [user, setUser] = useState(null);
-  const [isAdminApp, setIsAdminApp] = useState(false);
-  const [monthlyAiCost, setMonthlyAiCost] = useState(0);
   const [authReady, setAuthReady] = useState(false);
   const [redirectPending, setRedirectPending] = useState(() => hasFreshLoginRedirectFlag());
   const [redirectError, setRedirectError] = useState("");
@@ -95,14 +99,11 @@ function App() {
         if (cancelled) return;
         setUser(null);
         setAuthReady(true);
-        setIsAdminApp(false);
-        setMonthlyAiCost(0);
         return;
       }
 
-      let tokenResult = null;
       try {
-        tokenResult = await firebaseUser.getIdTokenResult();
+        await firebaseUser.getIdTokenResult();
       } catch (tokenErr) {
         console.error("No se pudo leer el token de sesion:", tokenErr);
       }
@@ -112,10 +113,6 @@ function App() {
       setUser(firebaseUser);
       setAuthReady(true);
       setRedirectError("");
-
-      const byClaim = Boolean(tokenResult?.claims?.adminApp);
-      const byEmail = ADMIN_EMAIL_ALLOWLIST.has(normalizeEmail(tokenResult?.claims?.email || firebaseUser?.email));
-      setIsAdminApp(byClaim || byEmail);
 
       const cached = localStorage.getItem("selectedExercise");
       if (cached) {
@@ -143,28 +140,6 @@ function App() {
       unsubscribe();
     };
   }, []);
-
-  useEffect(() => {
-    if (!user || !isAdminApp) {
-      setMonthlyAiCost(0);
-      return undefined;
-    }
-    const now = new Date();
-    const monthKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-    const ref = doc(db, "auditLogs", `ai-cost-${monthKey}`);
-    const unsubscribe = onSnapshot(
-      ref,
-      (snapshot) => {
-        const raw = Number(snapshot.data()?.totalEur ?? 0);
-        setMonthlyAiCost(Number.isFinite(raw) && raw > 0 ? raw : 0);
-      },
-      (snapshotErr) => {
-        console.error("No se pudo cargar coste IA mensual:", snapshotErr);
-        setMonthlyAiCost(0);
-      }
-    );
-    return () => unsubscribe();
-  }, [user, isAdminApp]);
 
   useEffect(() => {
     if (darkMode) {
@@ -210,8 +185,7 @@ function App() {
   };
 
   const navButtonClass = (targetView) => `app-nav-btn${view === targetView ? " is-active" : ""}`;
-  const monthlyAiCostLabel = EUR_FORMATTER.format(monthlyAiCost);
-  const displayName = user?.displayName || user?.email || (isLocalTestMode ? "Usuario test" : "Usuario");
+  const greetingName = getShortUserName(user);
 
   if (!authReady || redirectPending) {
     return <div className="app-loading">Cargando…</div>;
@@ -292,17 +266,11 @@ function App() {
           </div>
           <div className="app-userbar">
             <p className="app-welcome">
-              Bienvenido <strong>{displayName}</strong>
+              ¡Vamos <strong>{greetingName}</strong>!
             </p>
             <button className="app-logout" onClick={handleLogout}>
               Cerrar sesión
             </button>
-            {isAdminApp && view === "form" && (
-              <div className="app-admin-cost app-admin-cost-inline" title="Gasto de IA acumulado del mes">
-                <span className="app-admin-cost-label">IA mes</span>
-                <strong className="app-admin-cost-value">{monthlyAiCostLabel}</strong>
-              </div>
-            )}
           </div>
         </header>
 

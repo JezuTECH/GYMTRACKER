@@ -57,12 +57,16 @@ describe("buildKpiSummary", () => {
     expect(summary.totalCalories).toBe(800);
     expect(summary.strengthRecords).toBe(2);
     expect(summary.enduranceRecords).toBe(1);
+    expect(summary.totalStrengthPower).toBe(416);
+    expect(summary.bestStrengthDayPower).toBe(416);
+    expect(summary.averageStrengthPowerPerDay).toBe(416);
     expect(summary.enduranceMinutes).toBe(30);
     expect(summary.enduranceDistance).toBe(5);
     expect(summary.averageSpeedKmh).toBe(10);
     expect(summary.endurancePace).toBe(6);
-    expect(summary.topExercises[0]).toEqual({ label: "Curl Máquina", value: 2 });
-    expect(summary.topGroups[0]).toEqual({ label: "Biceps", value: 2 });
+    expect(summary.strengthExercises[0]).toEqual({ label: "Curl Máquina", value: 416 });
+    expect(summary.strengthGroups[0]).toEqual({ label: "Biceps", value: 416 });
+    expect(summary.enduranceExercises[0]).toEqual({ label: "Cinta", value: 30 });
     expect(summary.enduranceGroups[0]).toEqual({ label: "Cardio", value: 30 });
   });
 });

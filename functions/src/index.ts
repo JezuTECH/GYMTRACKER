@@ -14,6 +14,8 @@ const adminDb = getFirestore();
 
 const BUDGET_EUR = 5;
 const MAX_CALL_EUR = 0.01;
+const TRAINING_PLAN_BUDGET_EUR = 10;
+const TRAINING_PLAN_MAX_CALL_EUR = 0.05;
 const USD_TO_EUR = 0.92;
 const PRICE_INPUT_USD_PER_TOKEN = 0.15 / 1_000_000;
 const PRICE_OUTPUT_USD_PER_TOKEN = 0.60 / 1_000_000;
@@ -32,6 +34,35 @@ const outputSchema = z.object({
   notes: z.string().max(800),
 });
 
+const trainingPlanExerciseSchema = z.object({
+  muscleGroup: z.string().max(80),
+  exercise: z.string().max(120),
+  trackingMode: z.enum(["strength", "endurance"]),
+  prescription: z.string().max(120),
+  intensity: z.string().max(120),
+  restSec: z.number().int().min(0).max(600).nullable().optional(),
+  durationMin: z.number().min(0).max(240).nullable().optional(),
+  distanceKm: z.number().min(0).max(100).nullable().optional(),
+  reason: z.string().max(240),
+});
+
+const trainingPlanDaySchema = z.object({
+  day: z.string().max(40),
+  focus: z.string().max(120),
+  objective: z.string().max(240),
+  warmup: z.string().max(400),
+  notes: z.string().max(400),
+  exercises: z.array(trainingPlanExerciseSchema).min(2).max(10),
+});
+
+const trainingPlanOutputSchema = z.object({
+  summary: z.string().max(1000),
+  rationale: z.string().max(1200),
+  warnings: z.array(z.string().max(240)).max(8),
+  recovery: z.array(z.string().max(200)).max(6),
+  weeklyPlan: z.array(trainingPlanDaySchema).min(1).max(7),
+});
+
 const round2 = (value: number): number => Math.round(value * 100) / 100;
 
 const toFiniteNumber = (value: unknown): number => {
@@ -47,6 +78,29 @@ const normalizeEmail = (value: unknown): string =>
 
 const capText = (value: unknown, max: number): string =>
   normalizeText(value).slice(0, max);
+
+const clampInt = (value: unknown, min: number, max: number, fallback: number): number => {
+  const next = Math.round(toFiniteNumber(value));
+  if (!Number.isFinite(next)) return fallback;
+  return Math.min(max, Math.max(min, next));
+};
+
+const toStringArray = (value: unknown, maxItems = 12, maxLength = 80): string[] => {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n,;|]+/)
+      : [];
+
+  const deduped = new Set<string>();
+  source.forEach((item) => {
+    const normalized = capText(item, maxLength);
+    if (!normalized) return;
+    deduped.add(normalized);
+  });
+
+  return Array.from(deduped).slice(0, maxItems);
+};
 
 const parseYoutube = (rawUrl: unknown): {valid: boolean; watchUrl?: string; videoId?: string} => {
   const raw = normalizeText(rawUrl);
@@ -419,6 +473,207 @@ export const analyzeExerciseYoutube = onCall(
       inputTokens,
       outputTokens,
       watchUrl: parsed.watchUrl,
+    };
+  }
+);
+
+export const generateAdminTrainingPlan = onCall(
+  {
+    region: "us-central1",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+  },
+  async (request) => {
+    if (!request.auth?.uid) {
+      throw new HttpsError("unauthenticated", "Debes iniciar sesión.");
+    }
+
+    const callerEmail = normalizeEmail(request.auth.token.email);
+    const isAdminByClaim = request.auth.token.adminApp === true;
+    const isAdminByEmail = ADMIN_EMAIL_ALLOWLIST.has(callerEmail);
+    if (!isAdminByClaim && !isAdminByEmail) {
+      throw new HttpsError("permission-denied", "Esta acción está reservada al administrador.");
+    }
+
+    const payload = (request.data ?? {}) as Record<string, unknown>;
+    const targetEmail = normalizeEmail(payload.targetEmail);
+    const targetName = capText(payload.targetName, 120);
+    const objective = capText(payload.objective, 600);
+    const goalType = capText(payload.goalType, 80) || "general_fitness";
+    const experienceLevel = capText(payload.experienceLevel, 40) || "intermediate";
+    const sessionsPerWeek = clampInt(payload.sessionsPerWeek, 1, 7, 4);
+    const sessionDurationMin = clampInt(payload.sessionDurationMin, 20, 180, 60);
+    const preferredSplit = capText(payload.preferredSplit, 120);
+    const preferredDays = capText(payload.preferredDays, 160);
+    const injuries = capText(payload.injuries, 800);
+    const notes = capText(payload.notes, 1400);
+    const focusMuscleGroups = toStringArray(payload.focusMuscleGroups, 10, 60);
+    const availableEquipment = toStringArray(payload.availableEquipment, 16, 60);
+    const dislikedExercises = toStringArray(payload.dislikedExercises, 16, 80);
+    const coachingInsights = toStringArray(payload.coachingInsights, 8, 240);
+
+    if (!objective) {
+      throw new HttpsError("invalid-argument", "El objetivo principal es obligatorio.");
+    }
+
+    const rawSnapshot =
+      payload.userSnapshot && typeof payload.userSnapshot === "object"
+        ? payload.userSnapshot as Record<string, unknown>
+        : {};
+
+    const snapshotLines = [
+      `Sesiones últimos 30 días: ${clampInt(rawSnapshot.sessions30d, 0, 90, 0)}`,
+      `Días activos últimos 30 días: ${clampInt(rawSnapshot.activeDays30d, 0, 31, 0)}`,
+      `Frecuencia media semanal estimada: ${toFiniteNumber(rawSnapshot.avgSessionsPerWeek).toFixed(1)}`,
+      `Carga media semanal fuerza: ${Math.round(toFiniteNumber(rawSnapshot.avgWeeklyLoad))}`,
+      `Monotonía media: ${toFiniteNumber(rawSnapshot.avgMonotony).toFixed(2)}`,
+      `Strain medio: ${Math.round(toFiniteNumber(rawSnapshot.avgStrain))}`,
+      `Tendencia carga fuerza: ${toFiniteNumber(rawSnapshot.loadTrendPct).toFixed(1)}%`,
+      `Ejercicio principal: ${capText(rawSnapshot.mainExercise, 120) || "-"}`,
+      `PR recientes: ${clampInt(rawSnapshot.recentPRHits, 0, 20, 0)}`,
+      `Semanas sin PR: ${clampInt(rawSnapshot.weeksSinceLastPR, 0, 52, 0)}`,
+      `Grupo dominante: ${capText(rawSnapshot.topGroupName, 80) || "-"}`,
+      `Share grupo dominante: ${toFiniteNumber(rawSnapshot.topGroupSharePct).toFixed(1)}%`,
+      `Minutos resistencia 30d: ${Math.round(toFiniteNumber(rawSnapshot.enduranceMinutes30d))}`,
+      `Distancia resistencia 30d: ${toFiniteNumber(rawSnapshot.enduranceDistance30d).toFixed(1)} km`,
+      `Grupos a reforzar: ${toStringArray(rawSnapshot.weakestGroups, 4, 60).join(", ") || "-"}`,
+    ];
+
+    const rawLibrary = Array.isArray(payload.exerciseLibrary) ? payload.exerciseLibrary : [];
+    const exerciseLibrary = rawLibrary
+      .slice(0, 80)
+      .map((entry) => {
+        const item = entry && typeof entry === "object" ? entry as Record<string, unknown> : {};
+        return {
+          muscleGroup: capText(item.muscleGroup, 80),
+          exercise: capText(item.exercise, 120),
+          trackingMode: item.trackingMode === "endurance" ? "endurance" : "strength",
+          youtubeUrl: capText(item.youtubeUrl, 240),
+          notes: capText(item.notes, 160),
+        };
+      })
+      .filter((entry) => entry.muscleGroup && entry.exercise);
+
+    const libraryLines = exerciseLibrary.length
+      ? exerciseLibrary
+        .map((entry, index) =>
+          `${index + 1}. ${entry.muscleGroup} | ${entry.exercise} | ${entry.trackingMode}` +
+          `${entry.youtubeUrl ? ` | YouTube: ${entry.youtubeUrl}` : ""}` +
+          `${entry.notes ? ` | Nota: ${entry.notes}` : ""}`
+        )
+        .join("\n")
+      : "Sin biblioteca específica. Puedes proponer ejercicios genéricos y seguros.";
+
+    const monthKey = getMonthKeyMadrid();
+    const costRef = adminDb.collection("auditLogs").doc(`ai-plan-cost-${monthKey}`);
+    const costSnap = await costRef.get();
+    const currentMonthCostEur = toFiniteNumber(costSnap.data()?.totalEur);
+    if (currentMonthCostEur + TRAINING_PLAN_MAX_CALL_EUR > TRAINING_PLAN_BUDGET_EUR) {
+      throw new HttpsError("resource-exhausted", "Límite mensual de IA para planes alcanzado.");
+    }
+
+    const prompt = [
+      "Actúa como entrenador personal senior especializado en hipertrofia, fuerza y recomposición corporal.",
+      "Escribe en español claro, útil y sin relleno.",
+      "Debes crear un plan semanal realista, seguro y accionable.",
+      `Objetivo principal: ${objective}.`,
+      `Meta tipo: ${goalType}.`,
+      `Nivel del usuario: ${experienceLevel}.`,
+      `Sesiones por semana exactas: ${sessionsPerWeek}.`,
+      `Duración objetivo por sesión: ${sessionDurationMin} minutos.`,
+      preferredSplit ? `Split o preferencia estructural: ${preferredSplit}.` : "",
+      preferredDays ? `Días preferidos o restricciones de agenda: ${preferredDays}.` : "",
+      focusMuscleGroups.length ? `Grupos prioritarios: ${focusMuscleGroups.join(", ")}.` : "",
+      availableEquipment.length ? `Material disponible: ${availableEquipment.join(", ")}.` : "",
+      dislikedExercises.length ? `Ejercicios a evitar: ${dislikedExercises.join(", ")}.` : "",
+      injuries ? `Lesiones, molestias o limitaciones: ${injuries}.` : "",
+      notes ? `Notas extra del usuario: ${notes}.` : "",
+      targetEmail ? `Usuario objetivo: ${targetEmail}.` : "",
+      targetName ? `Nombre o alias objetivo: ${targetName}.` : "",
+      "Contexto de histórico reciente:",
+      ...snapshotLines.map((line) => `- ${line}`),
+      coachingInsights.length ? "Insights detectados:" : "",
+      ...coachingInsights.map((line) => `- ${line}`),
+      "Biblioteca prioritaria de ejercicios disponibles. Úsala cuando tenga sentido y prioriza ejercicios listados aquí:",
+      libraryLines,
+      "Reglas de decisión:",
+      "1. Respeta exactamente el número de sesiones por semana.",
+      "2. La suma de ejercicios y volumen debe caber aproximadamente en la duración marcada.",
+      "3. Si hay molestias o ejercicios prohibidos, evita variantes agresivas.",
+      "4. Equilibra estímulo, recuperación y progresión.",
+      "5. Usa ejercicios de resistencia solo cuando aporten al objetivo.",
+      "6. En fuerza usa prescripciones tipo '4 x 6-8', '3 x 10-12' o similares dentro del campo prescription.",
+      "7. En resistencia usa prescription con formato práctico como '30 min Z2' o '6 x 2 min fuerte / 2 min suave'.",
+      "8. No inventes métricas clínicas, no des consejos médicos y no prometas resultados.",
+      "9. En cada ejercicio explica brevemente por qué está ahí dentro del campo reason.",
+      "10. Devuelve solo datos válidos para el esquema solicitado.",
+    ].filter(Boolean).join("\n");
+
+    let response;
+    try {
+      response = await ai.generate({
+        model: gemini20Flash,
+        prompt,
+        config: {
+          temperature: 0.35,
+          maxOutputTokens: 2200,
+        },
+        output: {
+          schema: trainingPlanOutputSchema,
+        },
+      });
+    } catch (err) {
+      logger.error("Error en IA generateAdminTrainingPlan", err);
+      throw new HttpsError("internal", "No se pudo ejecutar IA en backend.");
+    }
+
+    const usage = (response as {usage?: {inputTokens?: number; outputTokens?: number}}).usage;
+    const inputTokens = Math.max(0, Math.floor(toFiniteNumber(usage?.inputTokens)));
+    const outputTokens = Math.max(0, Math.floor(toFiniteNumber(usage?.outputTokens)));
+
+    let costEur = computeCostEur(inputTokens, outputTokens);
+    if (!Number.isFinite(costEur) || costEur <= 0) {
+      costEur = TRAINING_PLAN_MAX_CALL_EUR;
+    }
+    costEur = Math.min(TRAINING_PLAN_MAX_CALL_EUR, round2(costEur));
+
+    const remaining = Math.max(0, round2(TRAINING_PLAN_BUDGET_EUR - currentMonthCostEur));
+    const chargedCostEur = Math.min(costEur, remaining);
+    const newTotalEur = round2(currentMonthCostEur + chargedCostEur);
+
+    await costRef.set({
+      monthKey,
+      budgetEur: TRAINING_PLAN_BUDGET_EUR,
+      maxPerCallEur: TRAINING_PLAN_MAX_CALL_EUR,
+      totalEur: newTotalEur,
+      calls: FieldValue.increment(1),
+      inputTokens: FieldValue.increment(inputTokens),
+      outputTokens: FieldValue.increment(outputTokens),
+      lastCostEur: chargedCostEur,
+      lastUid: request.auth.uid,
+      targetEmail,
+      goalType,
+      sessionsPerWeek,
+      updatedAt: FieldValue.serverTimestamp(),
+    }, {merge: true});
+
+    const output = response.output;
+    return {
+      summary: capText(output?.summary, 1000),
+      rationale: capText(output?.rationale, 1200),
+      warnings: Array.isArray(output?.warnings)
+        ? output.warnings.map((item) => capText(item, 240)).filter(Boolean)
+        : [],
+      recovery: Array.isArray(output?.recovery)
+        ? output.recovery.map((item) => capText(item, 200)).filter(Boolean)
+        : [],
+      weeklyPlan: Array.isArray(output?.weeklyPlan) ? output.weeklyPlan : [],
+      costEur: chargedCostEur,
+      totalMonthEur: newTotalEur,
+      monthKey,
+      inputTokens,
+      outputTokens,
+      objective,
     };
   }
 );

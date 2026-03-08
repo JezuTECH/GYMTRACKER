@@ -73,8 +73,18 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByText("ExerciseForm Mock")).toBeInTheDocument();
-    expect(screen.getByText(/Bienvenido/i)).toBeInTheDocument();
+    expect(screen.getByText(/¡Vamos/i)).toBeInTheDocument();
+    expect(screen.getByText("Jesus")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Cerrar sesión/i })).toBeInTheDocument();
+  });
+
+  test("usa un nombre corto derivado del email cuando no hay displayName", async () => {
+    setupAuth({ uid: "u1", email: "jesus.rodriguez@gmail.com", getIdTokenResult: jest.fn().mockResolvedValue({ claims: {} }) });
+
+    render(<App />);
+
+    expect(await screen.findByText("ExerciseForm Mock")).toBeInTheDocument();
+    expect(screen.getByText("jesus")).toBeInTheDocument();
   });
 
   test("permite cambiar entre vistas desde navegación", async () => {

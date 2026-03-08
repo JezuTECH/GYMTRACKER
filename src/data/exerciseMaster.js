@@ -198,7 +198,7 @@ export const saveUserExercise = async (db, uid, exerciseId, input) => {
   );
 
   return {
-    ...toExerciseOption(payload),
+    ...toExerciseOption({ ...(existing || {}), ...payload }),
     exerciseId: ref.id,
   };
 };

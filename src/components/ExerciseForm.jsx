@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Flame, Pencil, TrendingDown, TrendingUp } from "lucide-react";
 import {
   collection,
   doc,
@@ -53,6 +54,13 @@ const formatDateLabel = (value) => {
   const date = value instanceof Date ? value : new Date(value);
   const weekday = date.toLocaleDateString("es-ES", { weekday: "long" });
   return `${date.toLocaleDateString("es-ES")} (${weekday})`;
+};
+
+const formatCompactDateLabel = (value) => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  const weekdayMap = ["dom", "lun", "mar", "mie", "jue", "vie", "sab"];
+  return `${date.toLocaleDateString("es-ES")} (${weekdayMap[date.getDay()] || ""})`;
 };
 
 const formatHeadlineDate = (value) => {
@@ -159,10 +167,44 @@ const summarizeSession = (rows = [], trackingMode = TRACKING_MODES.STRENGTH) => 
   const metrics = getStrengthMetrics(rows);
   const compactLine = `${metrics.averageWeight ?? "-"} kg · ${metrics.averageReps ?? "-"} reps`;
   return {
-    title: `PowerScore ${metrics.powerScore} · ${compactLine}`,
-    badge: `Score ${metrics.powerScore}`,
+    title: `PowerScore ${metrics.powerScore}`,
+    badge: String(metrics.powerScore),
     compactLine,
     detailLine: "",
+  };
+};
+
+const buildStrengthHeadlineState = (groupedSessions = []) => {
+  if (!Array.isArray(groupedSessions) || groupedSessions.length < 2) return null;
+
+  const sessionScores = groupedSessions.map((session) => getStrengthMetrics(session.rows).powerScore);
+  const latestScore = sessionScores[0] ?? 0;
+  const previousScore = sessionScores[1] ?? null;
+  const previousBestScore =
+    sessionScores.length > 1 ? Math.max(...sessionScores.slice(1)) : null;
+
+  if (previousBestScore != null && latestScore > previousBestScore) {
+    return {
+      kind: "record",
+      label: "Récord",
+      Icon: Flame,
+    };
+  }
+
+  if (previousScore == null || latestScore === previousScore) return null;
+
+  if (latestScore > previousScore) {
+    return {
+      kind: "up",
+      label: "Mejora",
+      Icon: TrendingUp,
+    };
+  }
+
+  return {
+    kind: "down",
+    label: "Por debajo",
+    Icon: TrendingDown,
   };
 };
 
@@ -404,6 +446,13 @@ const ExerciseForm = ({
   const groupedCurrentSessions = useMemo(() => groupRowsByDay(currentRows), [currentRows]);
   const latestSession = groupedCurrentSessions[0] || null;
   const previousSession = groupedCurrentSessions[1] || null;
+  const latestStrengthHeadlineState = useMemo(
+    () =>
+      trackingMode === TRACKING_MODES.STRENGTH
+        ? buildStrengthHeadlineState(groupedCurrentSessions)
+        : null,
+    [groupedCurrentSessions, trackingMode]
+  );
 
   const summaryData = useMemo(() => buildSummaryItems(allExercises, allWorkouts), [allExercises, allWorkouts]);
   const groupedSummaryData = useMemo(
@@ -724,7 +773,7 @@ const ExerciseForm = ({
 
     return (
       <div className="exercise-detail-card">
-        <table className="exercise-detail-table">
+        <table className="exercise-detail-table exercise-detail-table--dense">
           <thead>
             <tr>
               <th>Hora</th>
@@ -739,7 +788,7 @@ const ExerciseForm = ({
                   <th>Reps</th>
                 </>
               )}
-              <th>Acciones</th>
+              <th aria-label="Editar"></th>
             </tr>
           </thead>
           <tbody>
@@ -761,13 +810,15 @@ const ExerciseForm = ({
                   <div className="exercise-row-actions">
                     <button
                       type="button"
-                      className="exercise-detail-action-btn"
+                      className="exercise-detail-action-btn exercise-detail-icon-btn"
                       onClick={(event) => {
                         event.stopPropagation();
                         startEditingRow(row);
                       }}
+                      aria-label="Editar registro"
+                      title="Editar registro"
                     >
-                      Editar
+                      <Pencil size={12} strokeWidth={2.2} />
                     </button>
                   </div>
                 </td>
@@ -910,6 +961,15 @@ const ExerciseForm = ({
           <div className="exercise-headline exercise-headline-stack">
             <strong>
               {formatHeadlineDate(latestSession.date)} · {latestSummary.title}
+              {latestStrengthHeadlineState && (
+                <span
+                  className={`exercise-headline-trend is-${latestStrengthHeadlineState.kind}`}
+                  title={latestStrengthHeadlineState.label}
+                  aria-label={latestStrengthHeadlineState.label}
+                >
+                  <latestStrengthHeadlineState.Icon size={16} strokeWidth={2.4} />
+                </span>
+              )}
               <button
                 type="button"
                 className="exercise-info-btn"
@@ -944,7 +1004,7 @@ const ExerciseForm = ({
           </div>
         )}
 
-        <div className="exercise-entry-grid">
+        <div className={`exercise-entry-grid${trackingMode === TRACKING_MODES.STRENGTH ? " is-strength" : ""}`}>
           {trackingMode === TRACKING_MODES.ENDURANCE ? (
             <>
               <div className="exercise-entry-field">
@@ -1094,6 +1154,11 @@ const ExerciseForm = ({
                           onClick={() => applyExerciseSelection(item)}
                         >
                           <strong className="exercise-summary-title">{item.exercise}</strong>
+                          {item.latestSession && (
+                            <span className="exercise-summary-date-inline">
+                              {formatCompactDateLabel(item.latestDate)}
+                            </span>
+                          )}
                         </button>
                         <span className="exercise-summary-score">{item.latestBadge}</span>
                         {item.latestSession && (
@@ -1110,13 +1175,6 @@ const ExerciseForm = ({
                       </div>
                       {item.latestSession ? (
                         <>
-                          <p className="exercise-summary-lastday">
-                            Último día: {formatDateLabel(item.latestDate)}
-                            {item.latestCompactLine ? ` · ${item.latestCompactLine}` : ""}
-                          </p>
-                          {item.latestDetailLine && (
-                            <p className="exercise-summary-lastday">{item.latestDetailLine}</p>
-                          )}
                           {isOpen && renderSessionDetail(item.latestSession, item.trackingMode)}
                         </>
                       ) : (

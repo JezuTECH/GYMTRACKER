@@ -1,13 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { doc } from "firebase/firestore";
 import { httpsCallable } from "firebase/functions";
-import { Youtube } from "lucide-react";
+import { Camera, Image as ImageIcon, ImagePlus, Trash2, Youtube } from "lucide-react";
 import { db, functions } from "../firebase/config";
 import { getDocWithFreshAuth } from "../firebase/firestoreRetry";
 import {
   listUserExercises,
   saveUserExercise,
 } from "../data/exerciseMaster";
+import {
+  deleteExercisePhoto,
+  listExerciseMedia,
+  uploadExercisePhoto,
+} from "../data/exerciseMedia";
 import {
   TRACKING_MODES,
   buildCanonicalKey,
@@ -16,6 +21,13 @@ import {
   normalizeText,
   normalizeTrackingMode,
 } from "../utils/exerciseCatalog";
+import { compressImageFile } from "../utils/compressImageFile";
+import {
+  MAX_PHOTOS_PER_EXERCISE,
+  MAX_USER_MEDIA_BYTES,
+  formatBytesLabel,
+  getRemainingPhotoSlots,
+} from "../utils/exerciseMediaLimits";
 
 const sanitizeLegacyKey = (value = "") =>
   String(value)
@@ -90,6 +102,22 @@ const explainFirestoreError = (err, fallback) => {
   return fallback;
 };
 
+const explainMediaError = (err, fallback) => {
+  const code = String(err?.code || "").toLowerCase();
+  const message = normalizeText(err?.message);
+  if (message) return message;
+  if (code.includes("permission-denied")) {
+    return "Permisos insuficientes para gestionar fotos.";
+  }
+  if (code.includes("unauthenticated")) {
+    return "Tu sesión no es válida. Cierra sesión y vuelve a entrar.";
+  }
+  if (code.includes("storage/unknown")) {
+    return "No se pudo procesar la foto. Intenta con otra imagen.";
+  }
+  return fallback;
+};
+
 const toDraftFromExercise = (exerciseOption = {}) => ({
   trackingMode: normalizeTrackingMode(exerciseOption.trackingMode),
   description: normalizeText(exerciseOption.description),
@@ -109,8 +137,17 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [aiFilling, setAiFilling] = useState(false);
+  const [mediaItems, setMediaItems] = useState([]);
+  const [mediaUsageBytes, setMediaUsageBytes] = useState(0);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaDeletingId, setMediaDeletingId] = useState("");
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [selectedMediaPreview, setSelectedMediaPreview] = useState(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
+  const galleryInputRef = useRef(null);
+  const cameraInputRef = useRef(null);
 
   const groupedPairs = useMemo(() => {
     return Object.entries(
@@ -147,6 +184,8 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
     if (!muscleGroup || !exercise) return null;
     return allExercises.find((item) => exerciseMatchesCanonicalKey(item, currentCanonicalKey)) || null;
   }, [allExercises, currentCanonicalKey, exercise, muscleGroup]);
+  const remainingPhotoSlots = getRemainingPhotoSlots(mediaItems.length);
+  const mediaSummaryLabel = `${mediaItems.length}/${MAX_PHOTOS_PER_EXERCISE} fotos · ${formatBytesLabel(mediaUsageBytes)} / ${formatBytesLabel(MAX_USER_MEDIA_BYTES)}`;
 
   const applySelection = async (nextSelection = {}, options = {}) => {
     const nextGroup = normalizeText(nextSelection.muscleGroup);
@@ -262,6 +301,52 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
     setActiveExerciseId(matchedExistingExercise.exerciseId);
     setDraft(toDraftFromExercise(matchedExistingExercise));
   }, [activeExerciseId, matchedExistingExercise]);
+
+  useEffect(() => {
+    if (!user || !activeExerciseId) {
+      setMediaItems([]);
+      setMediaUsageBytes(0);
+      setMediaLoading(false);
+      setUploadProgress(0);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMedia = async () => {
+      setMediaLoading(true);
+      try {
+        const next = await listExerciseMedia(db, user.uid, activeExerciseId);
+        if (cancelled) return;
+        setMediaItems(next.items);
+        setMediaUsageBytes(next.totalBytes);
+        setAllExercises((previous) => previous.map((item) => (
+          item.exerciseId === activeExerciseId
+            ? {
+                ...item,
+                mediaCount: next.items.length,
+                mediaBytes: next.items.reduce((sum, mediaItem) => sum + Number(mediaItem.sizeBytes || 0), 0),
+                hasPhotos: next.items.length > 0,
+              }
+            : item
+        )));
+      } catch (loadErr) {
+        if (cancelled) return;
+        console.error("Error cargando fotos de la ficha:", loadErr);
+        setError(explainMediaError(loadErr, "No se pudieron cargar las fotos de la ficha."));
+      } finally {
+        if (!cancelled) {
+          setMediaLoading(false);
+        }
+      }
+    };
+
+    loadMedia();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeExerciseId, user]);
 
   const handleSave = async () => {
     const nextGroup = normalizeText(muscleGroup);
@@ -405,27 +490,136 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
     }
   };
 
+  const resetInputValue = (inputRef) => {
+    if (inputRef?.current) {
+      inputRef.current.value = "";
+    }
+  };
+
+  const handleMediaFiles = async (fileList, sourceLabel) => {
+    if (!activeExerciseId) {
+      setError("Guarda la ficha antes de subir fotos.");
+      return;
+    }
+
+    const sourceFiles = Array.from(fileList || []).filter((file) => file.type.startsWith("image/"));
+    if (!sourceFiles.length) return;
+
+    const allowedFiles = sourceFiles.slice(0, remainingPhotoSlots);
+    if (!allowedFiles.length) {
+      setError(`Ya has alcanzado el máximo de ${MAX_PHOTOS_PER_EXERCISE} fotos en esta ficha.`);
+      return;
+    }
+
+    setMediaUploading(true);
+    setUploadProgress(0);
+    setError("");
+    setMessage("");
+
+    let successCount = 0;
+    let nextUsageBytes = mediaUsageBytes;
+    let nextItems = [...mediaItems];
+
+    try {
+      for (let index = 0; index < allowedFiles.length; index += 1) {
+        const rawFile = allowedFiles[index];
+        const compressed = await compressImageFile(rawFile);
+        const uploaded = await uploadExercisePhoto({
+          db,
+          uid: user.uid,
+          exerciseId: activeExerciseId,
+          file: compressed.file,
+          width: compressed.width,
+          height: compressed.height,
+          onProgress: (progress) => {
+            const normalized = (index + progress) / allowedFiles.length;
+            setUploadProgress(normalized);
+          },
+        });
+        nextItems = [uploaded, ...nextItems].sort((left, right) => {
+          const leftTime = left.createdAt?.getTime?.() || 0;
+          const rightTime = right.createdAt?.getTime?.() || 0;
+          return rightTime - leftTime;
+        });
+        const nextMediaCount = nextItems.length;
+        const nextMediaBytes = nextItems.reduce((sum, mediaItem) => sum + Number(mediaItem.sizeBytes || 0), 0);
+        nextUsageBytes += compressed.file.size;
+        successCount += 1;
+        setMediaItems(nextItems);
+        setMediaUsageBytes(nextUsageBytes);
+        setAllExercises((previous) => previous.map((item) => (
+          item.exerciseId === activeExerciseId
+            ? {
+                ...item,
+                mediaCount: nextMediaCount,
+                mediaBytes: nextMediaBytes,
+                hasPhotos: nextMediaCount > 0,
+              }
+            : item
+        )));
+      }
+
+      const skippedCount = sourceFiles.length - allowedFiles.length;
+      if (successCount > 0) {
+        const suffix = skippedCount > 0 ? ` ${skippedCount} foto(s) se ignoraron por límite.` : "";
+        setMessage(`${successCount} foto(s) cargadas desde ${sourceLabel}.${suffix}`);
+      }
+    } catch (uploadErr) {
+      console.error("Error subiendo foto:", uploadErr);
+      setError(explainMediaError(uploadErr, "No se pudo subir la foto."));
+    } finally {
+      setMediaUploading(false);
+      setUploadProgress(0);
+      resetInputValue(galleryInputRef);
+      resetInputValue(cameraInputRef);
+    }
+  };
+
+  const handleDeleteMedia = async (asset) => {
+    if (!asset?.id) return;
+    if (!window.confirm("¿Quieres borrar esta foto de la ficha?")) return;
+
+    setMediaDeletingId(asset.id);
+    setError("");
+    setMessage("");
+    try {
+      await deleteExercisePhoto({
+        db,
+        uid: user.uid,
+        exerciseId: activeExerciseId,
+        asset,
+      });
+      setMediaItems((previous) => {
+        const nextItems = previous.filter((item) => item.id !== asset.id);
+        setAllExercises((allPrevious) => allPrevious.map((item) => (
+          item.exerciseId === activeExerciseId
+            ? {
+                ...item,
+                mediaCount: nextItems.length,
+                mediaBytes: nextItems.reduce((sum, mediaItem) => sum + Number(mediaItem.sizeBytes || 0), 0),
+                hasPhotos: nextItems.length > 0,
+              }
+            : item
+        )));
+        return nextItems;
+      });
+      setMediaUsageBytes((previous) => Math.max(0, previous - Number(asset.sizeBytes || 0)));
+      setMessage("Foto borrada correctamente.");
+    } catch (deleteErr) {
+      console.error("Error borrando foto:", deleteErr);
+      setError(explainMediaError(deleteErr, "No se pudo borrar la foto."));
+    } finally {
+      setMediaDeletingId("");
+    }
+  };
+
   return (
     <div className="exercise-chart-shell library-page">
       <header className="library-head">
         <button className="library-back" onClick={onBack} type="button">← Volver</button>
-        <div>
-          <h2>Biblioteca de ejercicios</h2>
-          <p>Edita la ficha maestra, el nombre visible y el modo de registro de cada ejercicio.</p>
-        </div>
       </header>
 
       <section className="library-selectors">
-        <div className="library-selectors-actions">
-          <button
-            className="library-reset-btn"
-            onClick={clearGroupSelection}
-            type="button"
-            disabled={!muscleGroup && !exercise}
-          >
-            Limpiar selección
-          </button>
-        </div>
         <div>
           <label htmlFor="library-muscle-group">Grupo</label>
           <div className="library-selector-input-row">
@@ -505,13 +699,38 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
       ) : (
         <section className="library-card">
           <div className="library-card-head">
-            <div>
+            <div className="library-card-title-block">
               <h3>{normalizeText(muscleGroup)} · {normalizeText(exercise)}</h3>
               {activeExerciseId ? (
                 <p className="library-meta">Ficha maestra existente. Los cambios mantienen su identidad interna.</p>
               ) : (
                 <p className="library-meta">Aún no existe ficha maestra. Guarda para crearla.</p>
               )}
+              <div className="library-mode-panel">
+                <label className="library-switch-row" htmlFor="library-tracking-mode">
+                  <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.STRENGTH ? " is-active" : ""}`}>Peso / reps</span>
+                  <span className="tracking-mode-slider">
+                    <input
+                      id="library-tracking-mode"
+                      type="checkbox"
+                      checked={draft.trackingMode === TRACKING_MODES.ENDURANCE}
+                      onChange={(event) =>
+                        setDraft((prev) => ({
+                          ...prev,
+                          trackingMode: event.target.checked ? TRACKING_MODES.ENDURANCE : TRACKING_MODES.STRENGTH,
+                        }))
+                      }
+                    />
+                    <span className="tracking-mode-slider-ui" aria-hidden="true" />
+                  </span>
+                  <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.ENDURANCE ? " is-active" : ""}`}>Min / dist</span>
+                </label>
+                <p className="library-help-text">
+                  {draft.trackingMode === TRACKING_MODES.ENDURANCE
+                    ? "Este ejercicio se registrará con minutos obligatorios y distancia opcional."
+                    : "Este ejercicio se registrará con peso y repeticiones."}
+                </p>
+              </div>
             </div>
             <button className="library-save-btn" onClick={handleSave} type="button" disabled={saving || loading}>
               {saving ? "Guardando..." : activeExerciseId ? "Guardar ficha" : "Crear ficha"}
@@ -520,41 +739,115 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
 
           <div className="library-form-grid">
             <div className="library-full">
-              <label className="library-switch-row" htmlFor="library-tracking-mode">
-                <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.STRENGTH ? " is-active" : ""}`}>Peso / reps</span>
-                <span className="tracking-mode-slider">
-                  <input
-                    id="library-tracking-mode"
-                    type="checkbox"
-                    checked={draft.trackingMode === TRACKING_MODES.ENDURANCE}
-                    onChange={(event) =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        trackingMode: event.target.checked ? TRACKING_MODES.ENDURANCE : TRACKING_MODES.STRENGTH,
-                      }))
-                    }
-                  />
-                  <span className="tracking-mode-slider-ui" aria-hidden="true" />
-                </span>
-                <span className={`tracking-mode-option${draft.trackingMode === TRACKING_MODES.ENDURANCE ? " is-active" : ""}`}>Min / dist</span>
-              </label>
-              <p className="library-help-text">
-                {draft.trackingMode === TRACKING_MODES.ENDURANCE
-                  ? "Este ejercicio se registrará con minutos obligatorios y distancia opcional."
-                  : "Este ejercicio se registrará con peso y repeticiones."}
-              </p>
-            </div>
-            <div className="library-full">
               <label htmlFor="library-description">Descripción</label>
               <textarea
                 id="library-description"
+                className="library-description-field"
                 value={draft.description}
                 onChange={(event) => setDraft((prev) => ({ ...prev, description: event.target.value }))}
                 placeholder="Qué representa este ejercicio para ti o cómo quieres usarlo"
                 rows={2}
               />
             </div>
-            <div>
+            <div className="library-full library-media-section">
+              <div className="library-media-head">
+                <div>
+                  <label>Fotos de la ficha</label>
+                  <p className="library-help-text">
+                    Hasta {MAX_PHOTOS_PER_EXERCISE} fotos por ejercicio, comprimidas en cliente y con un máximo de {formatBytesLabel(2 * 1024 * 1024)} por foto.
+                  </p>
+                </div>
+                <span className="library-media-usage">{mediaSummaryLabel}</span>
+              </div>
+
+              <div className="library-media-toolbar">
+                <button
+                  type="button"
+                  className="library-media-btn"
+                  onClick={() => cameraInputRef.current?.click()}
+                  disabled={!activeExerciseId || mediaUploading || saving || remainingPhotoSlots === 0}
+                >
+                  <Camera size={15} />
+                  Cámara
+                </button>
+                <button
+                  type="button"
+                  className="library-media-btn"
+                  onClick={() => galleryInputRef.current?.click()}
+                  disabled={!activeExerciseId || mediaUploading || saving || remainingPhotoSlots === 0}
+                >
+                  <ImagePlus size={15} />
+                  Galería
+                </button>
+                {!activeExerciseId && (
+                  <span className="library-media-empty-note">Guarda la ficha primero para poder subir fotos.</span>
+                )}
+              </div>
+
+              <input
+                ref={cameraInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                hidden
+                onChange={(event) => handleMediaFiles(event.target.files, "cámara")}
+              />
+              <input
+                ref={galleryInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(event) => handleMediaFiles(event.target.files, "galería")}
+              />
+
+              {(mediaUploading || mediaLoading) && (
+                <div className="library-media-progress-wrap">
+                  <div className="library-media-progress">
+                    <span
+                      className="library-media-progress-bar"
+                      style={{ width: `${Math.round((mediaUploading ? uploadProgress : 0.2) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="library-media-progress-label">
+                    {mediaUploading ? `Subiendo ${Math.round(uploadProgress * 100)}%` : "Cargando fotos..."}
+                  </span>
+                </div>
+              )}
+
+              {mediaItems.length === 0 ? (
+                <p className="library-media-empty">Todavía no hay fotos en esta ficha.</p>
+              ) : (
+                <div className="library-media-grid">
+                  {mediaItems.map((asset) => (
+                    <article className="library-media-card" key={asset.id}>
+                      <button
+                        type="button"
+                        className="library-media-preview"
+                        onClick={() => setSelectedMediaPreview(asset)}
+                        title="Ampliar foto"
+                      >
+                        <img src={asset.downloadUrl} alt={`${exercise} referencia`} loading="lazy" />
+                      </button>
+                      <div className="library-media-meta">
+                        <span>{formatBytesLabel(asset.sizeBytes)}</span>
+                        <button
+                          type="button"
+                          className="library-media-delete"
+                          onClick={() => handleDeleteMedia(asset)}
+                          disabled={mediaDeletingId === asset.id}
+                          aria-label="Borrar foto"
+                          title="Borrar foto"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="library-full">
               <label htmlFor="library-youtube">YouTube</label>
               <input
                 id="library-youtube"
@@ -591,48 +884,79 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
                 </div>
               )}
             </div>
-            <div>
-              <label htmlFor="library-equipment">Material</label>
-              <input
-                id="library-equipment"
-                type="text"
-                value={draft.equipment}
-                onChange={(event) => setDraft((prev) => ({ ...prev, equipment: event.target.value }))}
-                placeholder="Ej: barra, banco inclinado"
-              />
-            </div>
-            <div>
-              <label htmlFor="library-technique">Técnica clave</label>
-              <textarea
-                id="library-technique"
-                value={draft.technique}
-                onChange={(event) => setDraft((prev) => ({ ...prev, technique: event.target.value }))}
-                placeholder="Puntos técnicos importantes"
-                rows={3}
-              />
-            </div>
-            <div>
-              <label htmlFor="library-mistakes">Errores comunes</label>
-              <textarea
-                id="library-mistakes"
-                value={draft.mistakes}
-                onChange={(event) => setDraft((prev) => ({ ...prev, mistakes: event.target.value }))}
-                placeholder="Qué evitar"
-                rows={3}
-              />
-            </div>
-            <div className="library-full">
-              <label htmlFor="library-notes">Notas</label>
-              <textarea
-                id="library-notes"
-                value={draft.notes}
-                onChange={(event) => setDraft((prev) => ({ ...prev, notes: event.target.value }))}
-                placeholder="Notas rápidas para tu sesión"
-                rows={3}
-              />
-            </div>
+            <details className="library-full library-more-panel">
+              <summary>Más...</summary>
+              <div className="library-more-grid">
+                <div>
+                  <label htmlFor="library-technique">Técnica clave</label>
+                  <textarea
+                    id="library-technique"
+                    value={draft.technique}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, technique: event.target.value }))}
+                    placeholder="Puntos técnicos importantes"
+                    rows={3}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="library-equipment">Material</label>
+                  <input
+                    id="library-equipment"
+                    type="text"
+                    value={draft.equipment}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, equipment: event.target.value }))}
+                    placeholder="Ej: barra, banco inclinado"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="library-mistakes">Errores comunes</label>
+                  <textarea
+                    id="library-mistakes"
+                    value={draft.mistakes}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, mistakes: event.target.value }))}
+                    placeholder="Qué evitar"
+                    rows={3}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="library-notes">Notas</label>
+                  <textarea
+                    id="library-notes"
+                    value={draft.notes}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, notes: event.target.value }))}
+                    placeholder="Notas rápidas para tu sesión"
+                    rows={3}
+                  />
+                </div>
+              </div>
+            </details>
           </div>
         </section>
+      )}
+
+      {selectedMediaPreview && (
+        <div
+          className="library-media-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Vista ampliada de la foto"
+          onClick={() => setSelectedMediaPreview(null)}
+        >
+          <div className="library-media-lightbox-card" onClick={(event) => event.stopPropagation()}>
+            <button
+              type="button"
+              className="library-media-lightbox-close"
+              onClick={() => setSelectedMediaPreview(null)}
+              aria-label="Cerrar imagen ampliada"
+            >
+              ✕
+            </button>
+            <img
+              src={selectedMediaPreview.downloadUrl}
+              alt={`${exercise} ampliada`}
+              className="library-media-lightbox-image"
+            />
+          </div>
+        </div>
       )}
 
       <section className="library-list">
@@ -646,6 +970,7 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
               <ul>
                 {entries.map((item) => {
                   const hasYoutube = Boolean(item.youtubeUrl);
+                  const hasPhotos = Boolean(item.hasPhotos);
                   const isEndurance = item.trackingMode === TRACKING_MODES.ENDURANCE;
                   return (
                     <li key={`${group}||${item.exerciseId || item.exercise}`}>
@@ -659,6 +984,15 @@ const ExerciseLibrary = ({ user, selectedExercise, onSelectExercise, onBack }) =
                         <span className="library-exercise-name">{item.exercise}</span>
                         <span className="library-inline-badges">
                           {isEndurance && <span className="library-mode-badge">Tiempo</span>}
+                          {hasPhotos && (
+                            <span
+                              className="library-photo-badge"
+                              title="Tiene fotos adjuntas"
+                              aria-label="Tiene fotos adjuntas"
+                            >
+                              <ImageIcon size={14} strokeWidth={2.2} />
+                            </span>
+                          )}
                           {hasYoutube && (
                             <span
                               className="library-youtube-badge"

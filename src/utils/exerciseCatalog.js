@@ -50,6 +50,9 @@ export const toExerciseOption = (entry = {}) => {
     mistakes: normalizeText(entry.mistakes),
     equipment: normalizeText(entry.equipment),
     notes: normalizeText(entry.notes),
+    mediaCount: Math.max(0, Number(entry.mediaCount || 0)),
+    mediaBytes: Math.max(0, Number(entry.mediaBytes || 0)),
+    hasPhotos: Number(entry.mediaCount || 0) > 0,
     isArchived: Boolean(entry.isArchived),
   };
 };

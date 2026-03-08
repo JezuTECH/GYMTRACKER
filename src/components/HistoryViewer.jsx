@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Pencil } from "lucide-react";
 import {
   collection,
   query,
@@ -756,13 +757,15 @@ const HistoryViewer = ({ user, onBack }) => {
                                   <div className="exercise-row-actions">
                                     <button
                                       type="button"
-                                      className="exercise-detail-action-btn"
+                                      className="exercise-detail-action-btn exercise-detail-icon-btn"
                                       onClick={(event) => {
                                         event.stopPropagation();
                                         startEditingRow(r);
                                       }}
+                                      aria-label="Editar registro"
+                                      title="Editar registro"
                                     >
-                                      Editar
+                                      <Pencil size={12} strokeWidth={2.2} />
                                     </button>
                                   </div>
                                 </td>
