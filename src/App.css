@@ -947,7 +947,7 @@ h3 {
 
 .exercise-summary-panel h3 {
   margin: 0 0 0.65rem;
-  font-size: 1rem;
+  font-size: 0.8rem;
   color: #163f9e;
 }
 
@@ -963,6 +963,7 @@ h3 {
   cursor: pointer;
   color: #2f4873;
   font-weight: 800;
+  font-size: 0.96rem;
 }
 
 .exercise-summary-list {
@@ -2984,9 +2985,17 @@ h3 {
     padding: 0.58rem;
   }
 
+  .exercise-summary-panel h3 {
+    font-size: 0.8rem;
+  }
+
   .exercise-summary-group {
     border-radius: 18px;
     padding: 0.4rem 0.5rem;
+  }
+
+  .exercise-summary-group-title {
+    font-size: 0.88rem;
   }
 
   .exercise-summary-item {
